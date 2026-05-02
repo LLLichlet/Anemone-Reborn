@@ -40,9 +40,9 @@ async fn main() {
         .cloned()
         .expect("at least one [[bridges]] required in config");
 
-    let (_qq_tx, qq_rx) = unbounded_channel::<String>();
+    let (qq_tx, qq_rx) = unbounded_channel::<String>();
     let bridge = Bridge::new(
-        _qq_tx.clone(),
+        qq_tx.clone(),
         first_bridge.discord_channel_id,
         first_bridge.qq_group_id,
     );

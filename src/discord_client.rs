@@ -76,6 +76,7 @@ async fn gateway_connect(
     Ok(ws)
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(bridge: Bridge, token: &str) {
     let proxy_url = std::env::var("HTTP_PROXY")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
@@ -127,7 +128,7 @@ pub async fn run(bridge: Bridge, token: &str) {
         info!("discord: gateway connected, waiting for hello...");
 
         // --- Gateway loop ---
-        let mut _heartbeat_interval: u64 = 0;
+        let mut heartbeat_interval: u64;
         let mut last_seq: Option<u64> = None;
         let (hb_tx, mut hb_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let mut hb_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -175,8 +176,8 @@ pub async fn run(bridge: Bridge, token: &str) {
 
                     match op {
                         10 => {
-                            _heartbeat_interval = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
-                            info!("discord: hello received, interval={_heartbeat_interval}ms");
+                            heartbeat_interval = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
+                            info!("discord: hello received, interval={heartbeat_interval}ms");
 
                             let identify = json!({
                                 "op": 2,
@@ -192,7 +193,7 @@ pub async fn run(bridge: Bridge, token: &str) {
                             });
                             ws.send(WsMessage::Text(identify.to_string().into())).await.ok();
 
-                            let hb_ms = _heartbeat_interval;
+                            let hb_ms = heartbeat_interval;
                             let hb_task_tx = hb_tx.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(hb_ms)).await;
@@ -243,7 +244,6 @@ pub async fn run(bridge: Bridge, token: &str) {
                             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                             break;
                         }
-                        11 => {}
                         _ => {}
                     }
                 }

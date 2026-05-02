@@ -11,7 +11,7 @@ impl Api {
         Self { tx }
     }
 
-    fn call(&self, action: &str, params: serde_json::Value) -> Result<(), AnemoneBotError> {
+    fn call(&self, action: &str, params: &serde_json::Value) -> Result<(), AnemoneBotError> {
         let payload = serde_json::json!({
             "action": action,
             "params": params,
@@ -24,7 +24,7 @@ impl Api {
     pub fn send_group_msg(&self, group_id: i64, message: &str) -> Result<(), AnemoneBotError> {
         self.call(
             "send_group_msg",
-            serde_json::json!({
+            &serde_json::json!({
                 "group_id": group_id,
                 "message": message,
             }),

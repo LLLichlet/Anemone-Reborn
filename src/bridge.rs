@@ -71,7 +71,7 @@ impl Bridge {
     /// Forward a message from QQ to Discord.
     pub async fn forward_qq_to_discord(&self, sender_name: &str, content: &str) {
         if let Some(http) = self.discord_http.get() {
-            let mut msg = format!("**[QQ] {}**: {}", sender_name, content);
+            let mut msg = format!("**[QQ] {sender_name}**: {content}");
             truncate_to_limit(&mut msg, 2000);
             let channel = serenity::model::id::ChannelId::new(self.discord_channel_id);
             if let Err(e) = channel.say(http, &msg).await {
@@ -83,7 +83,7 @@ impl Bridge {
     /// Forward a message from Discord to QQ.
     pub fn forward_discord_to_qq(&self, author_name: &str, content: &str) {
         let api = Api::new(self.qq_tx.clone());
-        let msg = format!("[Discord] {}: {}", author_name, content);
+        let msg = format!("[Discord] {author_name}: {content}");
         if let Err(e) = api.send_group_msg(self.qq_group_id, &msg) {
             tracing::error!("qq send failed: {e}");
         }

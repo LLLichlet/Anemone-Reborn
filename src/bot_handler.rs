@@ -40,17 +40,13 @@ pub async fn handle_message(event: Event, bridge: &Bridge) {
     if event.message_type != "group" || event.group_id != bridge.qq_group_id() {
         return;
     }
-    let name = event
-        .sender
-        .as_ref()
-        .map(|s| {
-            if s.card.is_empty() {
-                s.nickname.as_str()
-            } else {
-                s.card.as_str()
-            }
-        })
-        .unwrap_or("unknown");
+    let name = event.sender.as_ref().map_or("unknown", |s| {
+        if s.card.is_empty() {
+            s.nickname.as_str()
+        } else {
+            s.card.as_str()
+        }
+    });
 
     let text = htmlescape::decode_html(&event.message).unwrap_or_else(|_| event.message.clone());
     let filtered = strip_cq_codes(&text);
