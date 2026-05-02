@@ -18,21 +18,34 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tracing::{error, info};
 
 use crate::bridge::Bridge;
+use crate::config::BridgeConfig;
 use crate::onebot_types::Event;
 
 struct AppState {
     bridge: Bridge,
     qq_rx: Arc<tokio::sync::Mutex<Option<UnboundedReceiver<String>>>>,
+    _bridges: Vec<BridgeConfig>,
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let config = config::load();
     let discord_token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN env var not set");
 
+    let first_bridge = config
+        .bridges
+        .first()
+        .cloned()
+        .expect("at least one [[bridges]] required in config");
+
     let (_qq_tx, qq_rx) = unbounded_channel::<String>();
-    let bridge = Bridge::new(_qq_tx.clone());
+    let bridge = Bridge::new(
+        _qq_tx.clone(),
+        first_bridge.discord_channel_id,
+        first_bridge.qq_group_id,
+    );
 
     // Spawn Discord client
     tokio::spawn(discord_client::run(bridge.clone(), discord_token.leak()));
@@ -40,15 +53,15 @@ async fn main() {
     let state = Arc::new(AppState {
         bridge,
         qq_rx: Arc::new(tokio::sync::Mutex::new(Some(qq_rx))),
+        _bridges: config.bridges,
     });
 
     let app = Router::new()
         .route("/onebot/v11/ws", get(ws_handler))
         .with_state(state);
 
-    let addr = config::WS_BIND_ADDR;
-    info!("bot ws server listening on {addr}");
-    let listener = TcpListener::bind(addr).await.unwrap();
+    info!("bot ws server listening on {}", config.bind_addr);
+    let listener = TcpListener::bind(&config.bind_addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 

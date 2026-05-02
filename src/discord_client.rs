@@ -12,7 +12,6 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
 use crate::bridge::Bridge;
-use crate::config;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
 async fn proxy_connect(
@@ -216,7 +215,7 @@ pub async fn run(bridge: Bridge, token: &str) {
                                 }
                                 "MESSAGE_CREATE" => {
                                     let channel_id = payload["d"]["channel_id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                                    if channel_id != config::DISCORD_CHANNEL_ID { continue; }
+                                    if channel_id != bridge.discord_channel_id() { continue; }
 
                                     let author_id = payload["d"]["author"]["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                                     if bridge.is_self_discord(author_id) { continue; }

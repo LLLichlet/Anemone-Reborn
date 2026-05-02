@@ -1,5 +1,4 @@
 use crate::bridge::Bridge;
-use crate::config;
 use crate::onebot_types::Event;
 use tracing::info;
 
@@ -38,17 +37,17 @@ pub async fn handle_message(event: Event, bridge: &Bridge) {
     if bridge.is_self_qq(event.user_id) {
         return;
     }
-    if event.message_type != "group" || event.group_id != config::QQ_GROUP_ID {
+    if event.message_type != "group" || event.group_id != bridge.qq_group_id() {
         return;
     }
     let name = event
         .sender
         .as_ref()
-        .and_then(|s| {
+        .map(|s| {
             if s.card.is_empty() {
-                Some(s.nickname.as_str())
+                s.nickname.as_str()
             } else {
-                Some(s.card.as_str())
+                s.card.as_str()
             }
         })
         .unwrap_or("unknown");

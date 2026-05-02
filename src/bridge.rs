@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::config;
 use crate::onebot_api::Api;
 
 #[derive(Clone)]
@@ -11,6 +10,8 @@ pub struct Bridge {
     discord_http: Arc<OnceLock<Arc<serenity::http::Http>>>,
     qq_self_id: Arc<OnceLock<i64>>,
     discord_self_id: Arc<OnceLock<u64>>,
+    discord_channel_id: u64,
+    qq_group_id: i64,
 }
 
 fn truncate_to_limit(s: &mut String, limit: usize) {
@@ -28,13 +29,23 @@ fn truncate_to_limit(s: &mut String, limit: usize) {
 }
 
 impl Bridge {
-    pub fn new(qq_tx: UnboundedSender<String>) -> Self {
+    pub fn new(qq_tx: UnboundedSender<String>, discord_channel_id: u64, qq_group_id: i64) -> Self {
         Self {
             qq_tx,
             discord_http: Arc::new(OnceLock::new()),
             qq_self_id: Arc::new(OnceLock::new()),
             discord_self_id: Arc::new(OnceLock::new()),
+            discord_channel_id,
+            qq_group_id,
         }
+    }
+
+    pub fn discord_channel_id(&self) -> u64 {
+        self.discord_channel_id
+    }
+
+    pub fn qq_group_id(&self) -> i64 {
+        self.qq_group_id
     }
 
     pub fn set_discord_http(&self, http: Arc<serenity::http::Http>) {
@@ -62,7 +73,7 @@ impl Bridge {
         if let Some(http) = self.discord_http.get() {
             let mut msg = format!("**[QQ] {}**: {}", sender_name, content);
             truncate_to_limit(&mut msg, 2000);
-            let channel = serenity::model::id::ChannelId::new(config::DISCORD_CHANNEL_ID);
+            let channel = serenity::model::id::ChannelId::new(self.discord_channel_id);
             if let Err(e) = channel.say(http, &msg).await {
                 tracing::error!("discord send failed: {e}");
             }
@@ -73,7 +84,7 @@ impl Bridge {
     pub fn forward_discord_to_qq(&self, author_name: &str, content: &str) {
         let api = Api::new(self.qq_tx.clone());
         let msg = format!("[Discord] {}: {}", author_name, content);
-        if let Err(e) = api.send_group_msg(config::QQ_GROUP_ID, &msg) {
+        if let Err(e) = api.send_group_msg(self.qq_group_id, &msg) {
             tracing::error!("qq send failed: {e}");
         }
     }
