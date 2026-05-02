@@ -128,24 +128,20 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
         info!("discord: gateway connected, waiting for hello...");
 
         // --- Gateway loop ---
-        let mut heartbeat_interval: u64;
         let mut last_seq: Option<u64> = None;
-        let mut hb_timer: Option<tokio::time::Interval> = None;
+        let (hb_tx, mut hb_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut hb_task: Option<tokio::task::JoinHandle<()>> = None;
 
         loop {
             tokio::select! {
-                // Proactive heartbeat: tick at the gateway's requested interval
-                _ = async {
-                    match hb_timer.as_mut() {
-                        Some(timer) => timer.tick().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
+                // Heartbeat: triggered by the heartbeat task via mpsc
+                Some(()) = hb_rx.recv() => {
                     let hb = json!({"op": 1, "d": last_seq});
                     if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
                         error!("heartbeat send failed: {e}");
                         break;
                     }
+                    info!("discord: heartbeat sent, seq={last_seq:?}");
                 }
                 msg = ws.next() => {
                     let Some(msg) = msg else {
@@ -179,14 +175,16 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
 
                     match op {
                         1 => {
+                            // Server-requested heartbeat — respond immediately
                             let hb = json!({"op": 1, "d": last_seq});
                             if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
                                 error!("heartbeat send failed: {e}");
                                 break;
                             }
+                            info!("discord: heartbeat (server-requested) sent");
                         }
                         10 => {
-                            heartbeat_interval = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
+                            let heartbeat_interval = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
                             info!("discord: hello received, interval={heartbeat_interval}ms");
 
                             let identify = json!({
@@ -206,10 +204,22 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
                                 break;
                             }
 
-                            let timer = tokio::time::interval(
-                                tokio::time::Duration::from_millis(heartbeat_interval)
-                            );
-                            hb_timer = Some(timer);
+                            // Start keepalive task: sends heartbeat every 30s.
+                            // This satisfies Discord's heartbeat_interval requirement
+                            // (30s < 41.25s) and keeps the proxy tunnel alive.
+                            if let Some(old) = hb_task.take() {
+                                old.abort();
+                            }
+                            let hb_task_tx = hb_tx.clone();
+                            hb_task = Some(tokio::spawn(async move {
+                                loop {
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                                    hb_task_tx.send(()).ok();
+                                }
+                            }));
+                        }
+                        11 => {
+                            info!("discord: heartbeat ack");
                         }
                         0 => {
                             let t = payload["t"].as_str().unwrap_or("");
