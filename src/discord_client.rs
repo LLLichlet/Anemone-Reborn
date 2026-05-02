@@ -12,13 +12,14 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
 use crate::bridge::Bridge;
+use crate::error::AnemoneBotError;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
 async fn proxy_connect(
     proxy_url: &str,
     host: &str,
     port: u16,
-) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<TcpStream, AnemoneBotError> {
     let proxy_addr = proxy_url
         .trim_start_matches("http://")
         .trim_start_matches("https://");
@@ -44,11 +45,10 @@ async fn proxy_connect(
     }
     let resp = std::str::from_utf8(&buf[..total]).unwrap_or("");
     if !resp.contains("200") {
-        return Err(format!(
+        return Err(AnemoneBotError::WebSocket(format!(
             "proxy CONNECT rejected: {}",
             resp.lines().next().unwrap_or("")
-        )
-        .into());
+        )));
     }
     Ok(stream)
 }
@@ -59,36 +59,38 @@ async fn gateway_connect(
     gateway_url: &str,
 ) -> Result<
     tokio_tungstenite::WebSocketStream<tokio_native_tls::TlsStream<TcpStream>>,
-    Box<dyn std::error::Error + Send + Sync>,
+    AnemoneBotError,
 > {
     let host = gateway_url
         .trim_start_matches("wss://")
         .trim_end_matches("/?v=10&encoding=json");
     let tcp = proxy_connect(proxy_url, host, 443).await?;
 
-    let tls_conn = NativeTlsConnector::builder()
-        .build()
-        .map_err(|e| format!("tls builder: {e}"))?;
+    let tls_conn = NativeTlsConnector::builder().build()?;
     let tls = TlsConnector::from(tls_conn);
-    let tls_stream = tls.connect(host, tcp).await?;
+    let tls_stream = tls
+        .connect(host, tcp)
+        .await
+        .map_err(|e| AnemoneBotError::WebSocket(format!("tls connect: {e}")))?;
 
-    let (ws, _) = tokio_tungstenite::client_async(gateway_url, tls_stream).await?;
+    let (ws, _) = tokio_tungstenite::client_async(gateway_url, tls_stream)
+        .await
+        .map_err(|e| AnemoneBotError::WebSocket(format!("ws connect: {e}")))?;
     Ok(ws)
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(bridge: Bridge, token: &str) {
+pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
     let proxy_url = std::env::var("HTTP_PROXY")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
-        .expect("HTTP_PROXY env var not set");
+        .map_err(|_| AnemoneBotError::Env("HTTP_PROXY or HTTPS_PROXY not set".into()))?;
 
     info!("discord: using proxy {proxy_url}");
 
     // --- HTTP client (proxied) ---
     let reqwest_client = reqwest::Client::builder()
-        .proxy(Proxy::all(&proxy_url).expect("invalid proxy url"))
-        .build()
-        .expect("failed to build reqwest client");
+        .proxy(Proxy::all(&proxy_url)?)
+        .build()?;
 
     let http = Arc::new(
         HttpBuilder::new(token)
@@ -101,15 +103,13 @@ pub async fn run(bridge: Bridge, token: &str) {
         .get("https://discord.com/api/v10/gateway/bot")
         .header("Authorization", format!("Bot {token}"))
         .send()
-        .await
-        .expect("failed to fetch gateway url")
+        .await?
         .json()
-        .await
-        .expect("invalid gateway response");
+        .await?;
 
     let gateway_url = gateway_info["url"]
         .as_str()
-        .expect("missing gateway url in response");
+        .ok_or_else(|| AnemoneBotError::WebSocket("missing gateway url in response".into()))?;
 
     info!("discord: gateway url = {gateway_url}");
     let gateway_url = format!("{gateway_url}/?v=10&encoding=json");
@@ -179,7 +179,6 @@ pub async fn run(bridge: Bridge, token: &str) {
 
                     match op {
                         1 => {
-                            // Server-requested heartbeat — respond immediately
                             let hb = json!({"op": 1, "d": last_seq});
                             if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
                                 error!("heartbeat send failed: {e}");
@@ -202,7 +201,10 @@ pub async fn run(bridge: Bridge, token: &str) {
                                     }
                                 }
                             });
-                            ws.send(WsMessage::Text(identify.to_string().into())).await.ok();
+                            if let Err(e) = ws.send(WsMessage::Text(identify.to_string().into())).await {
+                                error!("identify send failed: {e}");
+                                break;
+                            }
 
                             let timer = tokio::time::interval(
                                 tokio::time::Duration::from_millis(heartbeat_interval)

@@ -19,6 +19,7 @@ use tracing::{error, info};
 
 use crate::bridge::Bridge;
 use crate::config::BridgeConfig;
+use crate::error::AnemoneBotError;
 use crate::onebot_types::Event;
 
 struct AppState {
@@ -28,17 +29,18 @@ struct AppState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), AnemoneBotError> {
     tracing_subscriber::fmt::init();
 
-    let config = config::load();
-    let discord_token = std::env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN env var not set");
+    let config = config::load()?;
+    let discord_token = std::env::var("DISCORD_TOKEN")
+        .map_err(|_| AnemoneBotError::Env("DISCORD_TOKEN not set".into()))?;
 
     let first_bridge = config
         .bridges
         .first()
         .cloned()
-        .expect("at least one [[bridges]] required in config");
+        .ok_or_else(|| AnemoneBotError::Config("at least one [[bridges]] required".into()))?;
 
     let (qq_tx, qq_rx) = unbounded_channel::<String>();
     let bridge = Bridge::new(
@@ -48,7 +50,12 @@ async fn main() {
     );
 
     // Spawn Discord client
-    tokio::spawn(discord_client::run(bridge.clone(), discord_token.leak()));
+    let bridge_for_discord = bridge.clone();
+    tokio::spawn(async move {
+        if let Err(e) = discord_client::run(bridge_for_discord, discord_token.leak()).await {
+            error!("discord client fatal: {e}");
+        }
+    });
 
     let state = Arc::new(AppState {
         bridge,
@@ -61,8 +68,9 @@ async fn main() {
         .with_state(state);
 
     info!("bot ws server listening on {}", config.bind_addr);
-    let listener = TcpListener::bind(&config.bind_addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = TcpListener::bind(&config.bind_addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 async fn ws_handler(
