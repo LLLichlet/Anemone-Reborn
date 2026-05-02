@@ -130,18 +130,21 @@ pub async fn run(bridge: Bridge, token: &str) {
         // --- Gateway loop ---
         let mut heartbeat_interval: u64;
         let mut last_seq: Option<u64> = None;
-        let (hb_tx, mut hb_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let mut hb_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+        let mut hb_timer: Option<tokio::time::Interval> = None;
 
         loop {
             tokio::select! {
-                _ = hb_interval.tick() => {
-                    if let Ok(()) = hb_rx.try_recv() {
-                        let hb = json!({"op": 1, "d": last_seq});
-                        if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
-                            error!("heartbeat send failed: {e}");
-                            break;
-                        }
+                // Proactive heartbeat: tick at the gateway's requested interval
+                _ = async {
+                    match hb_timer.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let hb = json!({"op": 1, "d": last_seq});
+                    if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
+                        error!("heartbeat send failed: {e}");
+                        break;
                     }
                 }
                 msg = ws.next() => {
@@ -175,6 +178,14 @@ pub async fn run(bridge: Bridge, token: &str) {
                     if seq.is_some() { last_seq = seq; }
 
                     match op {
+                        1 => {
+                            // Server-requested heartbeat — respond immediately
+                            let hb = json!({"op": 1, "d": last_seq});
+                            if let Err(e) = ws.send(WsMessage::Text(hb.to_string().into())).await {
+                                error!("heartbeat send failed: {e}");
+                                break;
+                            }
+                        }
                         10 => {
                             heartbeat_interval = payload["d"]["heartbeat_interval"].as_u64().unwrap_or(45000);
                             info!("discord: hello received, interval={heartbeat_interval}ms");
@@ -193,15 +204,10 @@ pub async fn run(bridge: Bridge, token: &str) {
                             });
                             ws.send(WsMessage::Text(identify.to_string().into())).await.ok();
 
-                            let hb_ms = heartbeat_interval;
-                            let hb_task_tx = hb_tx.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(hb_ms)).await;
-                                loop {
-                                    hb_task_tx.send(()).ok();
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(hb_ms)).await;
-                                }
-                            });
+                            let timer = tokio::time::interval(
+                                tokio::time::Duration::from_millis(heartbeat_interval)
+                            );
+                            hb_timer = Some(timer);
                         }
                         0 => {
                             let t = payload["t"].as_str().unwrap_or("");
