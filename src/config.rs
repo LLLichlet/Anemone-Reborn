@@ -1,0 +1,3 @@
+pub const WS_BIND_ADDR: &str = "0.0.0.0:8082";
+pub const DISCORD_CHANNEL_ID: u64 = 1500156931485204591;
+pub const QQ_GROUP_ID: i64 = 244425765;
