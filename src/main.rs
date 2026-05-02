@@ -1,4 +1,4 @@
-mod bot_handler;
+mod qq_client;
 mod bridge;
 mod config;
 mod discord_client;
@@ -115,7 +115,7 @@ async fn handle_socket(
                             "qq message from {} ({}): {}",
                             event.user_id, event.message_type, event.message
                         );
-                        bot_handler::handle_message(event, &bridge).await;
+                        qq_client::handle_message(event, &bridge).await;
                     }
                     Ok(event)
                         if event.post_type == "meta_event"
