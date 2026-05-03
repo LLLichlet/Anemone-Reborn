@@ -3,8 +3,23 @@ use crate::message::QQMessage;
 use crate::onebot_types::Event;
 use tracing::info;
 
-/// Strip CQ codes from a message. For now just removes them.
-/// TODO: parse CQ codes and translate to platform-agnostic equivalents (images → URLs, at → @mentions, etc.)
+/// Extract the reply target message ID from a `[CQ:reply,id=<id>]` code.
+/// `OneBot` v11 encodes reply info as a CQ code inside the message body,
+/// not as a separate JSON field.
+fn extract_reply_id(msg: &str) -> Option<String> {
+    let start = msg.find("[CQ:reply,")?;
+    let slice = &msg[start..];
+    let end = slice.find(']')?;
+    let inner = &slice[10..end]; // after "[CQ:reply," before "]"
+    for part in inner.split(',') {
+        let mut kv = part.splitn(2, '=');
+        if let (Some("id"), Some(val)) = (kv.next(), kv.next()) {
+            return Some(val.trim().to_string());
+        }
+    }
+    None
+}
+
 fn strip_cq_codes(msg: &str) -> String {
     let chars: Vec<char> = msg.chars().collect();
     let mut result = String::new();
@@ -49,7 +64,11 @@ pub async fn handle_message(event: Event, bridge: &Bridge) {
         }
     });
 
+    // Decode HTML entities first (e.g. &amp; → &), then parse CQ reply
+    // from the raw message BEFORE stripping, so the reply ID survives.
     let text = htmlescape::decode_html(&event.message).unwrap_or_else(|_| event.message.clone());
+    let reply_to_msg_id =
+        extract_reply_id(&text).or_else(|| event.reply.map(|r| r.message_id.to_string()));
     let filtered = strip_cq_codes(&text);
     if filtered.is_empty() {
         return;
@@ -57,8 +76,10 @@ pub async fn handle_message(event: Event, bridge: &Bridge) {
 
     info!("qq -> discord: [{name}] {filtered}");
     let msg = QQMessage {
+        msg_id: event.message_id.to_string(),
         sender_name: name.to_string(),
         content: filtered,
+        reply_to_msg_id,
     };
     bridge.forward(&msg).await;
 }

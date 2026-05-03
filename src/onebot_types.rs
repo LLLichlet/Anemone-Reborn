@@ -15,6 +15,8 @@ pub struct Event {
     #[serde(default)]
     pub message_type: String,
     #[serde(default)]
+    pub message_id: i64,
+    #[serde(default)]
     pub user_id: i64,
     #[serde(default)]
     pub group_id: i64,
@@ -22,6 +24,9 @@ pub struct Event {
     pub message: String,
     #[serde(default)]
     pub sender: Option<Sender>,
+    // reply info
+    #[serde(default)]
+    pub reply: Option<ReplyInfo>,
     // meta_event fields for capturing bot's own QQ id
     #[serde(default)]
     pub self_id: i64,
@@ -29,4 +34,9 @@ pub struct Event {
     pub meta_event_type: String,
     #[serde(default)]
     pub sub_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplyInfo {
+    pub message_id: i64,
 }

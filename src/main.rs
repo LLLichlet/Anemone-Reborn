@@ -1,13 +1,19 @@
 mod bridge;
 mod config;
 mod discord_client;
+mod discord_sender;
 mod error;
 mod message;
 mod onebot_api;
 mod onebot_types;
 mod qq_client;
+mod qq_sender;
+mod sender;
+mod store;
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::State;
@@ -16,16 +22,22 @@ use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::bridge::Bridge;
 use crate::config::BridgeConfig;
+use crate::discord_sender::DiscordSender;
 use crate::error::AnemoneBotError;
+use crate::onebot_api::PendingMap;
 use crate::onebot_types::Event;
+use crate::qq_sender::QQSender;
+use crate::store::MessageStore;
 
 struct AppState {
     bridge: Bridge,
-    qq_rx: Arc<tokio::sync::Mutex<Option<UnboundedReceiver<String>>>>,
+    qq_rx: Arc<Mutex<Option<UnboundedReceiver<String>>>>,
+    pending: PendingMap,
     _bridges: Vec<BridgeConfig>,
 }
 
@@ -43,24 +55,67 @@ async fn main() -> Result<(), AnemoneBotError> {
         .cloned()
         .ok_or_else(|| AnemoneBotError::Config("at least one [[bridges]] required".into()))?;
 
+    let group_key = format!(
+        "d_{}:q_{}",
+        first_bridge.discord_channel_id, first_bridge.qq_group_id
+    );
+
+    // --- shared state -------------------------------------------------------
     let (qq_tx, qq_rx) = unbounded_channel::<String>();
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let discord_http_lock = Arc::new(OnceLock::new());
+    let qq_self_id = Arc::new(OnceLock::new());
+    let discord_self_id = Arc::new(OnceLock::new());
+
+    // --- platform senders ---------------------------------------------------
+    let senders: Vec<Box<dyn crate::sender::PlatformSender>> = vec![
+        Box::new(DiscordSender {
+            http: discord_http_lock.clone(),
+            channel_id: first_bridge.discord_channel_id,
+        }),
+        Box::new(QQSender {
+            tx: qq_tx.clone(),
+            pending: pending.clone(),
+            group_id: first_bridge.qq_group_id,
+        }),
+    ];
+
+    // --- store --------------------------------------------------------------
+    let store = MessageStore::new("anemone-bot.db")?;
+    // Clean up records older than 7 days
+    store.prune(604_800)?;
+
+    // --- bridge -------------------------------------------------------------
     let bridge = Bridge::new(
-        qq_tx.clone(),
+        senders,
+        store,
+        group_key,
+        qq_self_id.clone(),
+        discord_self_id.clone(),
         first_bridge.discord_channel_id,
         first_bridge.qq_group_id,
     );
 
-    // Spawn Discord client
+    // --- spawn Discord client -----------------------------------------------
     let bridge_for_discord = bridge.clone();
+    let http_lock_for_discord = discord_http_lock.clone();
     tokio::spawn(async move {
-        if let Err(e) = discord_client::run(bridge_for_discord, discord_token.leak()).await {
+        if let Err(e) = discord_client::run(
+            bridge_for_discord,
+            discord_token.leak(),
+            http_lock_for_discord,
+        )
+        .await
+        {
             error!("discord client fatal: {e}");
         }
     });
 
+    // --- axum ---------------------------------------------------------------
     let state = Arc::new(AppState {
         bridge,
-        qq_rx: Arc::new(tokio::sync::Mutex::new(Some(qq_rx))),
+        qq_rx: Arc::new(Mutex::new(Some(qq_rx))),
+        pending,
         _bridges: config.bridges,
     });
 
@@ -85,18 +140,20 @@ async fn ws_handler(
         .await
         .take()
         .expect("qq_rx already consumed; only one WS connection expected");
+    let pending = state.pending.clone();
 
-    ws.on_upgrade(move |socket| handle_socket(socket, bridge, qq_rx))
+    ws.on_upgrade(move |socket| handle_socket(socket, bridge, qq_rx, pending))
 }
 
 async fn handle_socket(
     socket: axum::extract::ws::WebSocket,
     bridge: Bridge,
     mut qq_rx: UnboundedReceiver<String>,
+    pending: PendingMap,
 ) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Forward queued OneBot actions to NapCat over WS
+    // Write task: forward queued OneBot actions to NapCat over WS
     let write_task = tokio::spawn(async move {
         while let Some(text) = qq_rx.recv().await {
             if ws_tx.send(Message::Text(text.into())).await.is_err() {
@@ -105,12 +162,33 @@ async fn handle_socket(
         }
     });
 
-    // Read loop: receive OneBot events from NapCat
+    // Read loop: receive OneBot events and API responses from NapCat
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(Message::Text(text)) => {
                 let text = text.to_string();
-                match serde_json::from_str::<Event>(&text) {
+
+                // Try parsing as generic JSON to check for API response (echo)
+                let value: serde_json::Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("failed to parse ws message: {e}");
+                        continue;
+                    }
+                };
+
+                // Dispatch API responses (echo + status fields present)
+                if let Some(echo) = value.get("echo").and_then(|e| e.as_str()) {
+                    if value.get("status").is_some() {
+                        if let Some(tx) = pending.lock().await.remove(echo) {
+                            let _ = tx.send(value);
+                        }
+                        continue;
+                    }
+                }
+
+                // Parse as OneBot event
+                match serde_json::from_value::<Event>(value) {
                     Ok(event) if event.post_type == "message" => {
                         info!(
                             "qq message from {} ({}): {}",

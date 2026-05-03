@@ -1,44 +1,59 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::sync::mpsc::UnboundedSender;
 
-use crate::onebot_api::Api;
+use tracing::{error, info};
+
+use crate::message::Message;
+use crate::sender::PlatformSender;
+use crate::store::MessageStore;
 
 #[derive(Clone)]
 pub struct Bridge {
-    qq_tx: UnboundedSender<String>,
-    discord_http: Arc<OnceLock<Arc<serenity::http::Http>>>,
+    senders: Arc<Vec<Box<dyn PlatformSender>>>,
+    store: Arc<MessageStore>,
+    group_key: String,
     qq_self_id: Arc<OnceLock<i64>>,
     discord_self_id: Arc<OnceLock<u64>>,
     discord_channel_id: u64,
     qq_group_id: i64,
 }
 
-fn truncate_to_limit(s: &mut String, limit: usize) {
-    if s.len() <= limit {
-        return;
+fn preview(content: &str, limit: usize) -> String {
+    let end = content
+        .char_indices()
+        .take(limit)
+        .last()
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let mut s = content[..end].to_string();
+    if content.len() > s.len() {
+        s.push_str("...");
     }
-    let suffix = "...";
-    let end = limit.saturating_sub(suffix.len());
-    let end = (0..=end)
-        .rev()
-        .find(|&i| s.is_char_boundary(i))
-        .unwrap_or(0);
-    s.truncate(end);
-    s.push_str(suffix);
+    s
 }
 
 impl Bridge {
-    pub fn new(qq_tx: UnboundedSender<String>, discord_channel_id: u64, qq_group_id: i64) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        senders: Vec<Box<dyn PlatformSender>>,
+        store: MessageStore,
+        group_key: String,
+        qq_self_id: Arc<OnceLock<i64>>,
+        discord_self_id: Arc<OnceLock<u64>>,
+        discord_channel_id: u64,
+        qq_group_id: i64,
+    ) -> Self {
         Self {
-            qq_tx,
-            discord_http: Arc::new(OnceLock::new()),
-            qq_self_id: Arc::new(OnceLock::new()),
-            discord_self_id: Arc::new(OnceLock::new()),
+            senders: Arc::new(senders),
+            store: Arc::new(store),
+            group_key,
+            qq_self_id,
+            discord_self_id,
             discord_channel_id,
             qq_group_id,
         }
     }
+
+    // -- accessors -----------------------------------------------------------
 
     pub fn discord_channel_id(&self) -> u64 {
         self.discord_channel_id
@@ -46,10 +61,6 @@ impl Bridge {
 
     pub fn qq_group_id(&self) -> i64 {
         self.qq_group_id
-    }
-
-    pub fn set_discord_http(&self, http: Arc<serenity::http::Http>) {
-        let _ = self.discord_http.set(http);
     }
 
     pub fn set_qq_self_id(&self, id: i64) {
@@ -68,24 +79,57 @@ impl Bridge {
         self.discord_self_id.get() == Some(&user_id)
     }
 
-    /// Forward a platform-agnostic message to the opposite platform(s).
-    pub async fn forward(&self, msg: &dyn crate::message::Message) {
-        match msg.source() {
-            crate::message::Platform::QQ => {
-                if let Some(http) = self.discord_http.get() {
-                    let mut text = format!("**[QQ] {}**: {}", msg.sender_name(), msg.content());
-                    truncate_to_limit(&mut text, 2000);
-                    let channel = serenity::model::id::ChannelId::new(self.discord_channel_id);
-                    if let Err(e) = channel.say(http, &text).await {
-                        tracing::error!("discord send failed: {e}");
-                    }
+    // -- forwarding ----------------------------------------------------------
+
+    /// Forward an incoming message to all other platforms.
+    /// Resolves reply mappings via the store, then calls each non-source sender.
+    pub async fn forward(&self, msg: &dyn Message) {
+        // Resolve reply target if this message is a reply
+        let reply_record = msg.reply_to_msg_id().and_then(|rid| {
+            match self.store.query(&self.group_key, msg.source(), rid) {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("store query failed: {e}");
+                    None
                 }
             }
-            crate::message::Platform::Discord => {
-                let api = Api::new(self.qq_tx.clone());
-                let text = format!("[Discord] {}: {}", msg.sender_name(), msg.content());
-                if let Err(e) = api.send_group_msg(self.qq_group_id, &text) {
-                    tracing::error!("qq send failed: {e}");
+        });
+
+        for sender in self.senders.iter() {
+            if sender.platform() == msg.source() {
+                continue;
+            }
+
+            let target_reply_id = reply_record
+                .as_ref()
+                .and_then(|r| r.id_on(sender.platform()))
+                .map(String::from);
+
+            match sender.send(msg, target_reply_id).await {
+                Ok(dst_msg_id) => {
+                    let _ = self.store.insert(
+                        &self.group_key,
+                        msg.source(),
+                        msg.msg_id(),
+                        sender.platform(),
+                        &dst_msg_id,
+                        msg.sender_name(),
+                        &preview(msg.content(), 100),
+                    );
+                    info!(
+                        "forwarded {:?} {} -> {:?} {}",
+                        msg.source(),
+                        msg.msg_id(),
+                        sender.platform(),
+                        dst_msg_id,
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "forward {:?} -> {:?} failed: {e}",
+                        msg.source(),
+                        sender.platform(),
+                    );
                 }
             }
         }

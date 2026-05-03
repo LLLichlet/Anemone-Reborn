@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector as NativeTlsConnector;
@@ -81,7 +82,11 @@ async fn gateway_connect(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
+pub async fn run(
+    bridge: Bridge,
+    token: &str,
+    http_lock: Arc<OnceLock<Arc<serenity::http::Http>>>,
+) -> Result<(), AnemoneBotError> {
     let proxy_url = std::env::var("HTTP_PROXY")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
         .map_err(|_| AnemoneBotError::Env("HTTP_PROXY or HTTPS_PROXY not set".into()))?;
@@ -230,7 +235,7 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
                                     let id = payload["d"]["user"]["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                                     info!("discord: ready as {name}#{id}");
 
-                                    bridge.set_discord_http(http.clone());
+                                    http_lock.set(http.clone()).ok();
                                     bridge.set_discord_self_id(id);
                                 }
                                 "MESSAGE_CREATE" => {
@@ -241,16 +246,25 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
                                     if bridge.is_self_discord(author_id) { continue; }
                                     if payload["d"]["author"]["bot"].as_bool().unwrap_or(false) { continue; }
 
+                                    let msg_id = payload["d"]["id"].as_str().unwrap_or("0");
                                     let name = payload["d"]["author"]["global_name"].as_str()
                                         .or_else(|| payload["d"]["author"]["username"].as_str())
                                         .unwrap_or("unknown");
                                     let content = payload["d"]["content"].as_str().unwrap_or("");
+                                    let reply_to_msg_id = payload["d"]["referenced_message"]["id"]
+                                        .as_str()
+                                        .or_else(|| {
+                                            payload["d"]["message_reference"]["message_id"].as_str()
+                                        })
+                                        .map(String::from);
 
                                     if !content.is_empty() {
                                         info!("discord -> qq: [{name}] {content}");
                                         let msg = DiscordMessage {
+                                            msg_id: msg_id.to_string(),
                                             sender_name: name.to_string(),
                                             content: content.to_string(),
+                                            reply_to_msg_id,
                                         };
                                         bridge.forward(&msg).await;
                                     }

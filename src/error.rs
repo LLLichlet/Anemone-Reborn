@@ -10,6 +10,10 @@ pub enum AnemoneBotError {
     Tls(#[from] native_tls::Error),
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("serenity: {0}")]
+    Serenity(String),
     #[error("channel: {0}")]
     ChannelSend(#[from] tokio::sync::mpsc::error::SendError<String>),
     #[error("websocket: {0}")]
