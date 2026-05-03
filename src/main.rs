@@ -1,10 +1,11 @@
-mod qq_client;
 mod bridge;
 mod config;
 mod discord_client;
 mod error;
+mod message;
 mod onebot_api;
 mod onebot_types;
+mod qq_client;
 
 use std::sync::Arc;
 

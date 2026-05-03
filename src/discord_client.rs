@@ -13,6 +13,7 @@ use tracing::{error, info, warn};
 
 use crate::bridge::Bridge;
 use crate::error::AnemoneBotError;
+use crate::message::DiscordMessage;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
 async fn proxy_connect(
@@ -247,7 +248,11 @@ pub async fn run(bridge: Bridge, token: &str) -> Result<(), AnemoneBotError> {
 
                                     if !content.is_empty() {
                                         info!("discord -> qq: [{name}] {content}");
-                                        bridge.forward_discord_to_qq(name, content);
+                                        let msg = DiscordMessage {
+                                            sender_name: name.to_string(),
+                                            content: content.to_string(),
+                                        };
+                                        bridge.forward(&msg).await;
                                     }
                                 }
                                 _ => {}

@@ -68,24 +68,26 @@ impl Bridge {
         self.discord_self_id.get() == Some(&user_id)
     }
 
-    /// Forward a message from QQ to Discord.
-    pub async fn forward_qq_to_discord(&self, sender_name: &str, content: &str) {
-        if let Some(http) = self.discord_http.get() {
-            let mut msg = format!("**[QQ] {sender_name}**: {content}");
-            truncate_to_limit(&mut msg, 2000);
-            let channel = serenity::model::id::ChannelId::new(self.discord_channel_id);
-            if let Err(e) = channel.say(http, &msg).await {
-                tracing::error!("discord send failed: {e}");
+    /// Forward a platform-agnostic message to the opposite platform(s).
+    pub async fn forward(&self, msg: &dyn crate::message::Message) {
+        match msg.source() {
+            crate::message::Platform::QQ => {
+                if let Some(http) = self.discord_http.get() {
+                    let mut text = format!("**[QQ] {}**: {}", msg.sender_name(), msg.content());
+                    truncate_to_limit(&mut text, 2000);
+                    let channel = serenity::model::id::ChannelId::new(self.discord_channel_id);
+                    if let Err(e) = channel.say(http, &text).await {
+                        tracing::error!("discord send failed: {e}");
+                    }
+                }
             }
-        }
-    }
-
-    /// Forward a message from Discord to QQ.
-    pub fn forward_discord_to_qq(&self, author_name: &str, content: &str) {
-        let api = Api::new(self.qq_tx.clone());
-        let msg = format!("[Discord] {author_name}: {content}");
-        if let Err(e) = api.send_group_msg(self.qq_group_id, &msg) {
-            tracing::error!("qq send failed: {e}");
+            crate::message::Platform::Discord => {
+                let api = Api::new(self.qq_tx.clone());
+                let text = format!("[Discord] {}: {}", msg.sender_name(), msg.content());
+                if let Err(e) = api.send_group_msg(self.qq_group_id, &text) {
+                    tracing::error!("qq send failed: {e}");
+                }
+            }
         }
     }
 }

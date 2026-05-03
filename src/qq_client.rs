@@ -1,9 +1,10 @@
 use crate::bridge::Bridge;
+use crate::message::QQMessage;
 use crate::onebot_types::Event;
 use tracing::info;
 
 /// Strip CQ codes from a message. For now just removes them.
-/// TODO: parse CQ codes and translate to Discord equivalents (images → URLs, at → @mentions, etc.)
+/// TODO: parse CQ codes and translate to platform-agnostic equivalents (images → URLs, at → @mentions, etc.)
 fn strip_cq_codes(msg: &str) -> String {
     let chars: Vec<char> = msg.chars().collect();
     let mut result = String::new();
@@ -55,5 +56,9 @@ pub async fn handle_message(event: Event, bridge: &Bridge) {
     }
 
     info!("qq -> discord: [{name}] {filtered}");
-    bridge.forward_qq_to_discord(name, &filtered).await;
+    let msg = QQMessage {
+        sender_name: name.to_string(),
+        content: filtered,
+    };
+    bridge.forward(&msg).await;
 }
