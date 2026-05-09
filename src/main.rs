@@ -43,20 +43,16 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::bridge::Bridge;
-use crate::config::BridgeConfig;
-use crate::discord_sender::DiscordSender;
+use crate::bridge::Bridges;
 use crate::error::AnemoneBotError;
 use crate::onebot_api::PendingMap;
 use crate::onebot_types::Event;
-use crate::qq_sender::QQSender;
 use crate::store::MessageStore;
 
 struct AppState {
-    bridge: Bridge,
+    bridges: Arc<Bridges>,
     qq_rx: Arc<Mutex<Option<UnboundedReceiver<String>>>>,
     pending: PendingMap,
-    _bridges: Vec<BridgeConfig>,
 }
 
 #[tokio::main]
@@ -65,16 +61,11 @@ async fn main() -> Result<(), AnemoneBotError> {
 
     let config = config::load()?;
 
-    let first_bridge = config
-        .bridges
-        .first()
-        .cloned()
-        .ok_or_else(|| AnemoneBotError::Config("at least one [[bridges]] required".into()))?;
-
-    let group_key = format!(
-        "d_{}:q_{}",
-        first_bridge.discord_channel_id, first_bridge.qq_group_id
-    );
+    if config.bridges.is_empty() {
+        return Err(AnemoneBotError::Config(
+            "at least one [[bridges]] required".into(),
+        ));
+    }
 
     // --- shared state -------------------------------------------------------
     let (qq_tx, qq_rx) = unbounded_channel::<String>();
@@ -83,43 +74,29 @@ async fn main() -> Result<(), AnemoneBotError> {
     let qq_self_id = Arc::new(OnceLock::new());
     let discord_self_id = Arc::new(OnceLock::new());
 
-    // --- platform senders ---------------------------------------------------
-    let senders: Vec<Box<dyn crate::sender::PlatformSender>> = vec![
-        Box::new(DiscordSender {
-            http: discord_http_lock.clone(),
-            channel_id: first_bridge.discord_channel_id,
-        }),
-        Box::new(QQSender {
-            tx: qq_tx.clone(),
-            pending: pending.clone(),
-            group_id: first_bridge.qq_group_id,
-        }),
-    ];
-
     // --- store --------------------------------------------------------------
-    let store = MessageStore::new("anemone-bot.db")?;
-    // Clean up records older than 7 days
+    let store = Arc::new(MessageStore::new("anemone-bot.db")?);
     store.prune(604_800)?;
 
-    // --- bridge -------------------------------------------------------------
-    let bridge = Bridge::new(
-        senders,
-        store,
-        group_key,
-        qq_self_id.clone(),
-        discord_self_id.clone(),
-        first_bridge.discord_channel_id,
-        first_bridge.qq_group_id,
-    );
+    // --- bridges ------------------------------------------------------------
+    let bridges = Arc::new(Bridges::new(
+        &config.bridges,
+        &discord_http_lock,
+        &qq_tx,
+        &pending,
+        &qq_self_id,
+        &discord_self_id,
+        &store,
+    ));
 
     // --- spawn Discord client -----------------------------------------------
-    let bridge_for_discord = bridge.clone();
-    let http_lock_for_discord = discord_http_lock.clone();
+    let bridges_for_discord = bridges.clone();
+    let http_lock_for_discord = discord_http_lock;
     let discord_token = config.discord_token.clone();
     let http_proxy = config.http_proxy.clone();
     tokio::spawn(async move {
         if let Err(e) = discord_client::run(
-            bridge_for_discord,
+            bridges_for_discord,
             &discord_token,
             http_lock_for_discord,
             http_proxy.as_deref(),
@@ -132,10 +109,9 @@ async fn main() -> Result<(), AnemoneBotError> {
 
     // --- axum ---------------------------------------------------------------
     let state = Arc::new(AppState {
-        bridge,
+        bridges,
         qq_rx: Arc::new(Mutex::new(Some(qq_rx))),
         pending,
-        _bridges: config.bridges,
     });
 
     let app = Router::new()
@@ -152,7 +128,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl axum::response::IntoResponse {
-    let bridge = state.bridge.clone();
+    let bridges = state.bridges.clone();
     let qq_rx = state
         .qq_rx
         .lock()
@@ -161,12 +137,12 @@ async fn ws_handler(
         .expect("qq_rx already consumed; only one WS connection expected");
     let pending = state.pending.clone();
 
-    ws.on_upgrade(move |socket| handle_socket(socket, bridge, qq_rx, pending))
+    ws.on_upgrade(move |socket| handle_socket(socket, bridges, qq_rx, pending))
 }
 
 async fn handle_socket(
     socket: axum::extract::ws::WebSocket,
-    bridge: Bridge,
+    bridges: Arc<Bridges>,
     mut qq_rx: UnboundedReceiver<String>,
     pending: PendingMap,
 ) {
@@ -213,7 +189,7 @@ async fn handle_socket(
                             "qq message from {} ({}): {}",
                             event.user_id, event.message_type, event.message
                         );
-                        qq_client::handle_message(event, &bridge).await;
+                        qq_client::handle_message(event, &bridges).await;
                     }
                     Ok(event)
                         if event.post_type == "meta_event"
@@ -221,7 +197,7 @@ async fn handle_socket(
                             && event.sub_type == "connect" =>
                     {
                         info!("napcat connected, self_id = {}", event.self_id);
-                        bridge.set_qq_self_id(event.self_id);
+                        bridges.set_qq_self_id(event.self_id);
                     }
                     Ok(_) => {}
                     Err(e) => error!("failed to parse event: {e}"),

@@ -30,7 +30,7 @@ use tokio_native_tls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
-use crate::bridge::Bridge;
+use crate::bridge::Bridges;
 use crate::error::AnemoneBotError;
 use crate::message::DiscordMessage;
 
@@ -109,7 +109,7 @@ async fn gateway_connect(
 
 #[allow(clippy::too_many_lines)]
 pub async fn run(
-    bridge: Bridge,
+    bridges: Arc<Bridges>,
     token: &str,
     http_lock: Arc<OnceLock<Arc<serenity::http::Http>>>,
     proxy_url: Option<&str>,
@@ -263,14 +263,14 @@ pub async fn run(
                                     info!("discord: ready as {name}#{id}");
 
                                     http_lock.set(http.clone()).ok();
-                                    bridge.set_discord_self_id(id);
+                                    bridges.set_discord_self_id(id);
                                 }
                                 "MESSAGE_CREATE" => {
                                     let channel_id = payload["d"]["channel_id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                                    if channel_id != bridge.discord_channel_id() { continue; }
+                                    let Some(bridge) = bridges.by_discord(channel_id) else { continue; };
 
                                     let author_id = payload["d"]["author"]["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                                    if bridge.is_self_discord(author_id) { continue; }
+                                    if bridges.is_self_discord(author_id) { continue; }
                                     if payload["d"]["author"]["bot"].as_bool().unwrap_or(false) { continue; }
 
                                     let msg_id = payload["d"]["id"].as_str().unwrap_or("0");

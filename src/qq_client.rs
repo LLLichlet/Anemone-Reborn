@@ -16,7 +16,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::bridge::Bridge;
+use crate::bridge::Bridges;
 use crate::message::QQMessage;
 use crate::onebot_types::Event;
 use tracing::info;
@@ -67,13 +67,16 @@ fn strip_cq_codes(msg: &str) -> String {
     result.trim().to_string()
 }
 
-pub async fn handle_message(event: Event, bridge: &Bridge) {
-    if bridge.is_self_qq(event.user_id) {
+pub async fn handle_message(event: Event, bridges: &Bridges) {
+    if bridges.is_self_qq(event.user_id) {
         return;
     }
-    if event.message_type != "group" || event.group_id != bridge.qq_group_id() {
+    if event.message_type != "group" {
         return;
     }
+    let Some(bridge) = bridges.by_qq(event.group_id) else {
+        return;
+    };
     let name = event.sender.as_ref().map_or("unknown", |s| {
         if s.card.is_empty() {
             s.nickname.as_str()
