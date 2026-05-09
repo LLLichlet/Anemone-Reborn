@@ -35,6 +35,7 @@ pub trait Message: Sync {
 pub enum Platform {
     QQ,
     Discord,
+    Telegram,
 }
 
 pub struct QQMessage {
@@ -87,8 +88,32 @@ impl Message for DiscordMessage {
     }
 }
 
+pub struct TelegramMessage {
+    pub msg_id: String,
+    pub sender_name: String,
+    pub content: String,
+    pub reply_to_msg_id: Option<String>,
+}
+
+impl Message for TelegramMessage {
+    fn msg_id(&self) -> &str {
+        &self.msg_id
+    }
+    fn sender_name(&self) -> &str {
+        &self.sender_name
+    }
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn source(&self) -> Platform {
+        Platform::Telegram
+    }
+    fn reply_to_msg_id(&self) -> Option<&str> {
+        self.reply_to_msg_id.as_deref()
+    }
+}
+
 /// Resolved result of a reply lookup: maps one original message to IDs on all known platforms.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ReplyRecord {
     pub original_sender: String,
@@ -96,6 +121,7 @@ pub struct ReplyRecord {
     pub original_platform: Platform,
     pub discord_msg_id: Option<String>,
     pub qq_msg_id: Option<String>,
+    pub telegram_msg_id: Option<String>,
 }
 
 impl ReplyRecord {
@@ -104,6 +130,7 @@ impl ReplyRecord {
         match platform {
             Platform::Discord => self.discord_msg_id.as_deref(),
             Platform::QQ => self.qq_msg_id.as_deref(),
+            Platform::Telegram => self.telegram_msg_id.as_deref(),
         }
     }
 }

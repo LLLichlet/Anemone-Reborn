@@ -42,6 +42,7 @@ impl PlatformSender for QQSender {
     ) -> Result<String, AnemoneBotError> {
         let prefix = match msg.source() {
             Platform::Discord => "[Discord]",
+            Platform::Telegram => "[Telegram]",
             Platform::QQ => unreachable!("bridge filters own platform"),
         };
 

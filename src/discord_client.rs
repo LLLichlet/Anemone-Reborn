@@ -17,11 +17,9 @@
 */
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use futures_util::{SinkExt, StreamExt};
 use native_tls::TlsConnector as NativeTlsConnector;
-use reqwest::Proxy;
 use serde_json::json;
 use serenity::http::HttpBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,9 +28,10 @@ use tokio_native_tls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{error, info, warn};
 
-use crate::bridge::Bridges;
+use crate::bridge::{Bridges, DiscordContext};
 use crate::error::AnemoneBotError;
 use crate::message::DiscordMessage;
+use crate::proxy::build_reqwest_client;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
 async fn proxy_connect(
@@ -108,25 +107,17 @@ async fn gateway_connect(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(
-    bridges: Arc<Bridges>,
-    token: &str,
-    http_lock: Arc<OnceLock<Arc<serenity::http::Http>>>,
-    proxy_url: Option<&str>,
-) -> Result<(), AnemoneBotError> {
+pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), AnemoneBotError> {
+    let proxy_url = ctx.proxy.as_deref();
     if let Some(proxy) = proxy_url {
         info!("discord: using proxy {proxy}");
     }
 
     // --- HTTP client ---
-    let mut client_builder = reqwest::Client::builder();
-    if let Some(proxy) = proxy_url {
-        client_builder = client_builder.proxy(Proxy::all(proxy)?);
-    }
-    let reqwest_client = client_builder.build()?;
+    let reqwest_client = build_reqwest_client(proxy_url)?;
 
     let http = Arc::new(
-        HttpBuilder::new(token)
+        HttpBuilder::new(&ctx.token)
             .client(reqwest_client.clone())
             .build(),
     );
@@ -134,7 +125,7 @@ pub async fn run(
     // --- Get gateway URL ---
     let gateway_info: serde_json::Value = reqwest_client
         .get("https://discord.com/api/v10/gateway/bot")
-        .header("Authorization", format!("Bot {token}"))
+        .header("Authorization", format!("Bot {}", ctx.token))
         .send()
         .await?
         .json()
@@ -223,7 +214,7 @@ pub async fn run(
                             let identify = json!({
                                 "op": 2,
                                 "d": {
-                                    "token": token,
+                                    "token": &ctx.token,
                                     "intents": 33280,
                                     "properties": {
                                         "os": "windows",
@@ -262,7 +253,7 @@ pub async fn run(
                                     let id = payload["d"]["user"]["id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
                                     info!("discord: ready as {name}#{id}");
 
-                                    http_lock.set(http.clone()).ok();
+                                    ctx.http_lock.set(http.clone()).ok();
                                     bridges.set_discord_self_id(id);
                                 }
                                 "MESSAGE_CREATE" => {

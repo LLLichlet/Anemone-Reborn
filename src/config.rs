@@ -20,16 +20,25 @@ use serde::Deserialize;
 
 use crate::error::AnemoneBotError;
 
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Deserialize, Clone)]
 pub struct BridgeConfig {
-    pub discord_channel_id: u64,
-    pub qq_group_id: i64,
+    #[serde(default)]
+    pub discord_channel_id: Option<u64>,
+    #[serde(default)]
+    pub qq_group_id: Option<i64>,
+    #[serde(default)]
+    pub telegram_group_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
-    pub bind_addr: String,
-    pub discord_token: String,
+    #[serde(default)]
+    pub bind_addr: Option<String>,
+    #[serde(default)]
+    pub discord_token: Option<String>,
+    #[serde(default)]
+    pub telegram_token: Option<String>,
     #[serde(default)]
     pub http_proxy: Option<String>,
     pub bridges: Vec<BridgeConfig>,

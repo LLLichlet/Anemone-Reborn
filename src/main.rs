@@ -24,10 +24,13 @@ mod error;
 mod message;
 mod onebot_api;
 mod onebot_types;
+mod proxy;
 mod qq_client;
 mod qq_sender;
 mod sender;
 mod store;
+mod telegram_client;
+mod telegram_sender;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,10 +46,11 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use crate::bridge::Bridges;
+use crate::bridge::{Bridges, DiscordContext, QQContext, TelegramContext};
 use crate::error::AnemoneBotError;
 use crate::onebot_api::PendingMap;
 use crate::onebot_types::Event;
+use crate::proxy::build_reqwest_client;
 use crate::store::MessageStore;
 
 struct AppState {
@@ -67,60 +71,104 @@ async fn main() -> Result<(), AnemoneBotError> {
         ));
     }
 
-    // --- shared state -------------------------------------------------------
-    let (qq_tx, qq_rx) = unbounded_channel::<String>();
-    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-    let discord_http_lock = Arc::new(OnceLock::new());
-    let qq_self_id = Arc::new(OnceLock::new());
-    let discord_self_id = Arc::new(OnceLock::new());
-
     // --- store --------------------------------------------------------------
     let store = Arc::new(MessageStore::new("anemone-bot.db")?);
     store.prune(604_800)?;
 
+    // --- per-platform contexts ----------------------------------------------
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+
+    let (qq_ctx, qq_rx) = if config.bind_addr.is_some() {
+        let (tx, rx) = unbounded_channel::<String>();
+        let ctx = QQContext {
+            tx,
+            pending: pending.clone(),
+            self_id: Arc::new(OnceLock::new()),
+        };
+        (Some(ctx), Some(rx))
+    } else {
+        (None, None)
+    };
+
+    let discord_ctx = config.discord_token.as_ref().map(|token| DiscordContext {
+        http_lock: Arc::new(OnceLock::new()),
+        self_id: Arc::new(OnceLock::new()),
+        token: token.clone(),
+        proxy: config.http_proxy.clone(),
+    });
+
+    let telegram_ctx = config
+        .telegram_token
+        .as_ref()
+        .map(|token| -> Result<_, AnemoneBotError> {
+            Ok(TelegramContext {
+                http: build_reqwest_client(config.http_proxy.as_deref())?,
+                self_id: Arc::new(OnceLock::new()),
+                token: token.clone(),
+            })
+        })
+        .transpose()?;
+
     // --- bridges ------------------------------------------------------------
     let bridges = Arc::new(Bridges::new(
         &config.bridges,
-        &discord_http_lock,
-        &qq_tx,
-        &pending,
-        &qq_self_id,
-        &discord_self_id,
+        discord_ctx.as_ref(),
+        qq_ctx.as_ref(),
+        telegram_ctx.as_ref(),
         &store,
     ));
 
     // --- spawn Discord client -----------------------------------------------
-    let bridges_for_discord = bridges.clone();
-    let http_lock_for_discord = discord_http_lock;
-    let discord_token = config.discord_token.clone();
-    let http_proxy = config.http_proxy.clone();
-    tokio::spawn(async move {
-        if let Err(e) = discord_client::run(
-            bridges_for_discord,
-            &discord_token,
-            http_lock_for_discord,
-            http_proxy.as_deref(),
-        )
-        .await
-        {
-            error!("discord client fatal: {e}");
-        }
-    });
+    if let Some(ref dc) = discord_ctx {
+        let bridges_for_discord = bridges.clone();
+        let ctx = DiscordContext {
+            http_lock: dc.http_lock.clone(),
+            self_id: dc.self_id.clone(),
+            token: dc.token.clone(),
+            proxy: dc.proxy.clone(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = discord_client::run(bridges_for_discord, &ctx).await {
+                error!("discord client fatal: {e}");
+            }
+        });
+    }
 
-    // --- axum ---------------------------------------------------------------
-    let state = Arc::new(AppState {
-        bridges,
-        qq_rx: Arc::new(Mutex::new(Some(qq_rx))),
-        pending,
-    });
+    // --- spawn Telegram client ----------------------------------------------
+    if let Some(ref tc) = telegram_ctx {
+        let bridges_for_tg = bridges.clone();
+        let ctx = TelegramContext {
+            http: tc.http.clone(),
+            self_id: tc.self_id.clone(),
+            token: tc.token.clone(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = telegram_client::run(bridges_for_tg, &ctx).await {
+                error!("telegram client fatal: {e}");
+            }
+        });
+    }
 
-    let app = Router::new()
-        .route("/onebot/v11/ws", get(ws_handler))
-        .with_state(state);
+    // --- axum (QQ) ----------------------------------------------------------
+    if let (Some(bind_addr), Some(rx)) = (config.bind_addr, qq_rx) {
+        let state = Arc::new(AppState {
+            bridges,
+            qq_rx: Arc::new(Mutex::new(Some(rx))),
+            pending,
+        });
 
-    info!("bot ws server listening on {}", config.bind_addr);
-    let listener = TcpListener::bind(&config.bind_addr).await?;
-    axum::serve(listener, app).await?;
+        let app = Router::new()
+            .route("/onebot/v11/ws", get(ws_handler))
+            .with_state(state);
+
+        info!("bot ws server listening on {}", bind_addr);
+        let listener = TcpListener::bind(&bind_addr).await?;
+        axum::serve(listener, app).await?;
+    }
+
+    // All platforms omitted — wait forever (signals will still work)
+    info!("no servers to bind; idle");
+    tokio::signal::ctrl_c().await.ok();
     Ok(())
 }
 

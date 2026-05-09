@@ -17,11 +17,12 @@
 */
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::BridgeConfig;
 use crate::discord_sender::DiscordSender;
@@ -30,6 +31,30 @@ use crate::onebot_api::PendingMap;
 use crate::qq_sender::QQSender;
 use crate::sender::PlatformSender;
 use crate::store::MessageStore;
+use crate::telegram_sender::TelegramSender;
+
+// -- per-platform shared context ----------------------------------------------
+
+pub struct DiscordContext {
+    pub http_lock: Arc<OnceLock<Arc<serenity::http::Http>>>,
+    pub self_id: Arc<OnceLock<u64>>,
+    pub token: String,
+    pub proxy: Option<String>,
+}
+
+pub struct QQContext {
+    pub tx: UnboundedSender<String>,
+    pub pending: PendingMap,
+    pub self_id: Arc<OnceLock<i64>>,
+}
+
+pub struct TelegramContext {
+    pub http: reqwest::Client,
+    pub self_id: Arc<OnceLock<i64>>,
+    pub token: String,
+}
+
+// -- Bridge -------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct Bridge {
@@ -38,6 +63,8 @@ pub struct Bridge {
     group_key: String,
     qq_self_id: Arc<OnceLock<i64>>,
     discord_self_id: Arc<OnceLock<u64>>,
+    telegram_self_id: Arc<OnceLock<i64>>,
+    ready: Arc<AtomicBool>,
 }
 
 fn preview(content: &str, limit: usize) -> String {
@@ -60,6 +87,8 @@ impl Bridge {
         group_key: String,
         qq_self_id: Arc<OnceLock<i64>>,
         discord_self_id: Arc<OnceLock<u64>>,
+        telegram_self_id: Arc<OnceLock<i64>>,
+        ready: Arc<AtomicBool>,
     ) -> Self {
         Self {
             senders: Arc::new(senders),
@@ -67,6 +96,8 @@ impl Bridge {
             group_key,
             qq_self_id,
             discord_self_id,
+            telegram_self_id,
+            ready,
         }
     }
 
@@ -80,6 +111,10 @@ impl Bridge {
         let _ = self.discord_self_id.set(id);
     }
 
+    pub fn set_telegram_self_id(&self, id: i64) {
+        let _ = self.telegram_self_id.set(id);
+    }
+
     pub fn is_self_qq(&self, user_id: i64) -> bool {
         self.qq_self_id.get() == Some(&user_id)
     }
@@ -88,11 +123,23 @@ impl Bridge {
         self.discord_self_id.get() == Some(&user_id)
     }
 
+    pub fn is_self_telegram(&self, user_id: i64) -> bool {
+        self.telegram_self_id.get() == Some(&user_id)
+    }
+
     // -- forwarding ----------------------------------------------------------
 
     /// Forward an incoming message to all other platforms.
     /// Resolves reply mappings via the store, then calls each non-source sender.
     pub async fn forward(&self, msg: &dyn Message) {
+        if !self.ready.load(Ordering::SeqCst) {
+            info!(
+                "not all platforms ready yet, dropping message from {:?}",
+                msg.source()
+            );
+            return;
+        }
+
         // Resolve reply target if this message is a reply
         let reply_record = msg.reply_to_msg_id().and_then(|rid| {
             self.store
@@ -144,53 +191,122 @@ impl Bridge {
     }
 }
 
+// -- Bridges ------------------------------------------------------------------
+
 /// Container for multiple Bridge instances, keyed by platform channel/group ID.
+#[allow(clippy::struct_field_names)]
 pub struct Bridges {
     by_discord: HashMap<u64, Bridge>,
     by_qq: HashMap<i64, Bridge>,
+    by_telegram: HashMap<i64, Bridge>,
+    ready: Arc<AtomicBool>,
+    disc_self_id: Option<Arc<OnceLock<u64>>>,
+    qq_self_id: Option<Arc<OnceLock<i64>>>,
+    tg_self_id: Option<Arc<OnceLock<i64>>>,
 }
 
 impl Bridges {
+    #[allow(clippy::similar_names)]
     pub fn new(
         configs: &[BridgeConfig],
-        discord_http_lock: &Arc<OnceLock<Arc<serenity::http::Http>>>,
-        qq_tx: &UnboundedSender<String>,
-        pending: &PendingMap,
-        qq_self_id: &Arc<OnceLock<i64>>,
-        discord_self_id: &Arc<OnceLock<u64>>,
+        discord: Option<&DiscordContext>,
+        qq: Option<&QQContext>,
+        telegram: Option<&TelegramContext>,
         store: &Arc<MessageStore>,
     ) -> Self {
         let mut by_discord = HashMap::new();
         let mut by_qq = HashMap::new();
+        let mut by_telegram = HashMap::new();
 
-        for cfg in configs {
-            let group_key = format!("d_{}:q_{}", cfg.discord_channel_id, cfg.qq_group_id);
+        let ready = Arc::new(AtomicBool::new(false));
 
-            let senders: Vec<Box<dyn PlatformSender>> = vec![
-                Box::new(DiscordSender {
-                    http: discord_http_lock.clone(),
-                    channel_id: cfg.discord_channel_id,
-                }),
-                Box::new(QQSender {
-                    tx: qq_tx.clone(),
-                    pending: pending.clone(),
-                    group_id: cfg.qq_group_id,
-                }),
-            ];
+        let (empty_i64, empty_u64): (Arc<OnceLock<i64>>, Arc<OnceLock<u64>>) =
+            (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+
+        let disc_self_id = discord.map(|c| c.self_id.clone());
+        let qq_self_id = qq.map(|c| c.self_id.clone());
+        let tg_self_id = telegram.map(|c| c.self_id.clone());
+
+        let d_id = disc_self_id.as_ref().map_or(&empty_u64, |l| l);
+        let q_id = qq_self_id.as_ref().map_or(&empty_i64, |l| l);
+        let t_id = tg_self_id.as_ref().map_or(&empty_i64, |l| l);
+
+        for (i, cfg) in configs.iter().enumerate() {
+            let mut parts: Vec<String> = Vec::new();
+            let mut senders: Vec<Box<dyn PlatformSender>> = Vec::new();
+
+            if let (Some(dc), Some(ch)) = (discord, cfg.discord_channel_id) {
+                parts.push(format!("d_{ch}"));
+                senders.push(Box::new(DiscordSender {
+                    http: dc.http_lock.clone(),
+                    channel_id: ch,
+                }));
+            }
+            if let (Some(qc), Some(grp)) = (qq, cfg.qq_group_id) {
+                parts.push(format!("q_{grp}"));
+                senders.push(Box::new(QQSender {
+                    tx: qc.tx.clone(),
+                    pending: qc.pending.clone(),
+                    group_id: grp,
+                }));
+            }
+            if let (Some(tc), Some(chat)) = (telegram, cfg.telegram_group_id) {
+                parts.push(format!("t_{chat}"));
+                senders.push(Box::new(TelegramSender {
+                    http: tc.http.clone(),
+                    token: tc.token.clone(),
+                    chat_id: chat,
+                }));
+            }
+
+            if senders.len() < 2 {
+                warn!(
+                    "bridge [{i}] has only {} platform(s); at least 2 needed for forwarding",
+                    senders.len()
+                );
+            }
+
+            let group_key = parts.join(":");
 
             let bridge = Bridge::new(
                 senders,
                 store.clone(),
                 group_key,
-                qq_self_id.clone(),
-                discord_self_id.clone(),
+                q_id.clone(),
+                d_id.clone(),
+                t_id.clone(),
+                ready.clone(),
             );
 
-            by_discord.insert(cfg.discord_channel_id, bridge.clone());
-            by_qq.insert(cfg.qq_group_id, bridge);
+            if let Some(ch) = cfg.discord_channel_id {
+                by_discord.insert(ch, bridge.clone());
+            }
+            if let Some(grp) = cfg.qq_group_id {
+                by_qq.insert(grp, bridge.clone());
+            }
+            if let Some(chat) = cfg.telegram_group_id {
+                by_telegram.insert(chat, bridge);
+            }
         }
 
-        Self { by_discord, by_qq }
+        Self {
+            by_discord,
+            by_qq,
+            by_telegram,
+            ready,
+            disc_self_id,
+            qq_self_id,
+            tg_self_id,
+        }
+    }
+
+    fn check_ready(&self) {
+        let ok = self.disc_self_id.as_ref().is_none_or(|l| l.get().is_some())
+            && self.qq_self_id.as_ref().is_none_or(|l| l.get().is_some())
+            && self.tg_self_id.as_ref().is_none_or(|l| l.get().is_some());
+        if ok {
+            self.ready.store(true, Ordering::SeqCst);
+        }
     }
 
     pub fn by_discord(&self, channel_id: u64) -> Option<&Bridge> {
@@ -199,6 +315,10 @@ impl Bridges {
 
     pub fn by_qq(&self, group_id: i64) -> Option<&Bridge> {
         self.by_qq.get(&group_id)
+    }
+
+    pub fn by_telegram(&self, chat_id: i64) -> Option<&Bridge> {
+        self.by_telegram.get(&chat_id)
     }
 
     pub fn is_self_discord(&self, user_id: u64) -> bool {
@@ -215,15 +335,31 @@ impl Bridges {
             .is_some_and(|b| b.is_self_qq(user_id))
     }
 
+    pub fn is_self_telegram(&self, user_id: i64) -> bool {
+        self.by_telegram
+            .values()
+            .next()
+            .is_some_and(|b| b.is_self_telegram(user_id))
+    }
+
     pub fn set_qq_self_id(&self, id: i64) {
-        for bridge in self.by_qq.values() {
+        if let Some(bridge) = self.by_qq.values().next() {
             bridge.set_qq_self_id(id);
         }
+        self.check_ready();
     }
 
     pub fn set_discord_self_id(&self, id: u64) {
-        for bridge in self.by_discord.values() {
+        if let Some(bridge) = self.by_discord.values().next() {
             bridge.set_discord_self_id(id);
         }
+        self.check_ready();
+    }
+
+    pub fn set_telegram_self_id(&self, id: i64) {
+        if let Some(bridge) = self.by_telegram.values().next() {
+            bridge.set_telegram_self_id(id);
+        }
+        self.check_ready();
     }
 }

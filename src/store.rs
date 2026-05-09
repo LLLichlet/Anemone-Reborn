@@ -61,12 +61,14 @@ impl MessageStore {
         match p {
             Platform::QQ => "qq",
             Platform::Discord => "discord",
+            Platform::Telegram => "telegram",
         }
     }
 
     fn plat_from_str(s: &str) -> Platform {
         match s {
             "discord" => Platform::Discord,
+            "telegram" => Platform::Telegram,
             _ => Platform::QQ,
         }
     }
@@ -108,11 +110,22 @@ impl MessageStore {
 
         let (sender, preview, src_plat_str, src_msg, dst_plat_str, dst_msg) = row?;
 
-        let (discord_id, qq_id) = match (src_plat_str.as_str(), dst_plat_str.as_str()) {
-            ("qq", "discord") => (Some(dst_msg), Some(src_msg)),
-            ("discord", "qq") => (Some(src_msg), Some(dst_msg)),
-            _ => (None, None),
+        let mut discord_id = None;
+        let mut qq_id = None;
+        let mut telegram_id = None;
+
+        let mut set = |plat: &str, id: String, is_src: bool| {
+            if is_src {
+                match plat {
+                    "discord" => discord_id = Some(id),
+                    "qq" => qq_id = Some(id),
+                    "telegram" => telegram_id = Some(id),
+                    _ => {}
+                }
+            }
         };
+        set(src_plat_str.as_str(), src_msg, true);
+        set(dst_plat_str.as_str(), dst_msg, true);
 
         Ok(Some(ReplyRecord {
             original_sender: sender,
@@ -120,6 +133,7 @@ impl MessageStore {
             original_platform: Self::plat_from_str(&src_plat_str),
             discord_msg_id: discord_id,
             qq_msg_id: qq_id,
+            telegram_msg_id: telegram_id,
         }))
     }
 
