@@ -73,9 +73,9 @@ async fn proxy_connect(
     Ok(stream)
 }
 
-/// Connect to Discord gateway via proxy → TLS → WS.
+/// Connect to Discord gateway (via proxy if provided, otherwise direct TLS → WS).
 async fn gateway_connect(
-    proxy_url: &str,
+    proxy_url: Option<&str>,
     gateway_url: &str,
 ) -> Result<
     tokio_tungstenite::WebSocketStream<tokio_native_tls::TlsStream<TcpStream>>,
@@ -84,14 +84,22 @@ async fn gateway_connect(
     let host = gateway_url
         .trim_start_matches("wss://")
         .trim_end_matches("/?v=10&encoding=json");
-    let tcp = proxy_connect(proxy_url, host, 443).await?;
 
-    let tls_conn = NativeTlsConnector::builder().build()?;
-    let tls = TlsConnector::from(tls_conn);
-    let tls_stream = tls
-        .connect(host, tcp)
-        .await
-        .map_err(|e| AnemoneBotError::WebSocket(format!("tls connect: {e}")))?;
+    let tls_stream = if let Some(proxy) = proxy_url {
+        let tcp = proxy_connect(proxy, host, 443).await?;
+        let tls_conn = NativeTlsConnector::builder().build()?;
+        let tls = TlsConnector::from(tls_conn);
+        tls.connect(host, tcp)
+            .await
+            .map_err(|e| AnemoneBotError::WebSocket(format!("tls connect: {e}")))?
+    } else {
+        let tcp = TcpStream::connect((host, 443)).await?;
+        let tls_conn = NativeTlsConnector::builder().build()?;
+        let tls = TlsConnector::from(tls_conn);
+        tls.connect(host, tcp)
+            .await
+            .map_err(|e| AnemoneBotError::WebSocket(format!("tls connect: {e}")))?
+    };
 
     let (ws, _) = tokio_tungstenite::client_async(gateway_url, tls_stream)
         .await
@@ -104,17 +112,18 @@ pub async fn run(
     bridge: Bridge,
     token: &str,
     http_lock: Arc<OnceLock<Arc<serenity::http::Http>>>,
+    proxy_url: Option<&str>,
 ) -> Result<(), AnemoneBotError> {
-    let proxy_url = std::env::var("HTTP_PROXY")
-        .or_else(|_| std::env::var("HTTPS_PROXY"))
-        .map_err(|_| AnemoneBotError::Env("HTTP_PROXY or HTTPS_PROXY not set".into()))?;
+    if let Some(proxy) = proxy_url {
+        info!("discord: using proxy {proxy}");
+    }
 
-    info!("discord: using proxy {proxy_url}");
-
-    // --- HTTP client (proxied) ---
-    let reqwest_client = reqwest::Client::builder()
-        .proxy(Proxy::all(&proxy_url)?)
-        .build()?;
+    // --- HTTP client ---
+    let mut client_builder = reqwest::Client::builder();
+    if let Some(proxy) = proxy_url {
+        client_builder = client_builder.proxy(Proxy::all(proxy)?);
+    }
+    let reqwest_client = client_builder.build()?;
 
     let http = Arc::new(
         HttpBuilder::new(token)
@@ -139,8 +148,8 @@ pub async fn run(
     let gateway_url = format!("{gateway_url}/?v=10&encoding=json");
 
     loop {
-        info!("discord: connecting to gateway via proxy...");
-        let mut ws = match gateway_connect(&proxy_url, &gateway_url).await {
+        info!("discord: connecting to gateway...");
+        let mut ws = match gateway_connect(proxy_url, &gateway_url).await {
             Ok(ws) => ws,
             Err(e) => {
                 error!("gateway connect failed: {e}, retrying in 5s");

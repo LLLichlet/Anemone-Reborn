@@ -38,6 +38,4 @@ pub enum AnemoneBotError {
     WebSocket(String),
     #[error("config: {0}")]
     Config(String),
-    #[error("env: {0}")]
-    Env(String),
 }

@@ -64,8 +64,6 @@ async fn main() -> Result<(), AnemoneBotError> {
     tracing_subscriber::fmt::init();
 
     let config = config::load()?;
-    let discord_token = std::env::var("DISCORD_TOKEN")
-        .map_err(|_| AnemoneBotError::Env("DISCORD_TOKEN not set".into()))?;
 
     let first_bridge = config
         .bridges
@@ -117,11 +115,14 @@ async fn main() -> Result<(), AnemoneBotError> {
     // --- spawn Discord client -----------------------------------------------
     let bridge_for_discord = bridge.clone();
     let http_lock_for_discord = discord_http_lock.clone();
+    let discord_token = config.discord_token.clone();
+    let http_proxy = config.http_proxy.clone();
     tokio::spawn(async move {
         if let Err(e) = discord_client::run(
             bridge_for_discord,
-            discord_token.leak(),
+            &discord_token,
             http_lock_for_discord,
+            http_proxy.as_deref(),
         )
         .await
         {

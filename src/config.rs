@@ -29,6 +29,9 @@ pub struct BridgeConfig {
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub bind_addr: String,
+    pub discord_token: String,
+    #[serde(default)]
+    pub http_proxy: Option<String>,
     pub bridges: Vec<BridgeConfig>,
 }
 
