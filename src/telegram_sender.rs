@@ -41,8 +41,8 @@ impl PlatformSender for TelegramSender {
         reply_to_msg_id: Option<String>,
     ) -> Result<String, AnemoneBotError> {
         let prefix = match msg.source() {
-            Platform::Discord => "**[Discord]**",
-            Platform::QQ => "**[QQ]**",
+            Platform::Discord => "[Discord]",
+            Platform::QQ => "[QQ]",
             Platform::Telegram => unreachable!("bridge filters own platform"),
         };
 
