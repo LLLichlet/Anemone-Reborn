@@ -3,6 +3,11 @@ improving reusability through a unified message trait.
 
 Supported platforms: Discord, QQ (via NapCat/OneBot v11), Telegram.
 
+Features:
+- Bidirectional text message forwarding with reply chain resolution.
+- Image forwarding across platforms (images are downloaded and re-uploaded
+  natively; on download failure a "[图片]" placeholder is shown).
+
 Prerequisites:
 - Discord: create a bot at https://discord.com/developers/applications → Bot → copy token
 - QQ: install NapCat (https://github.com/NapNeko/NapCatQQ)

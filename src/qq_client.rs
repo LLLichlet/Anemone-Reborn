@@ -17,7 +17,7 @@
 */
 
 use crate::bridge::Bridges;
-use crate::message::QQMessage;
+use crate::message::{Attachment, QQMessage};
 use crate::onebot_types::Event;
 use tracing::info;
 
@@ -67,6 +67,58 @@ fn strip_cq_codes(msg: &str) -> String {
     result.trim().to_string()
 }
 
+/// Extract `[CQ:image,...]` blocks and return their `url` as `Attachment` entries.
+fn extract_images(msg: &str) -> Vec<Attachment> {
+    let mut images = Vec::new();
+    let chars: Vec<char> = msg.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if i + 10 <= chars.len()
+            && chars[i] == '['
+            && chars[i + 1] == 'C'
+            && chars[i + 2] == 'Q'
+            && chars[i + 3] == ':'
+            && chars[i + 4] == 'i'
+            && chars[i + 5] == 'm'
+            && chars[i + 6] == 'a'
+            && chars[i + 7] == 'g'
+            && chars[i + 8] == 'e'
+            && chars[i + 9] == ','
+        {
+            let start = i;
+            i += 10;
+            let mut depth = 1u32;
+            while i < chars.len() && depth > 0 {
+                match chars[i] {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            let inner: String = chars[start + 10..i - 1].iter().collect();
+            let mut url = None;
+            for part in inner.split(',') {
+                let mut kv = part.splitn(2, '=');
+                if let (Some("url"), Some(val)) = (kv.next(), kv.next()) {
+                    url = Some(val.trim().to_string());
+                }
+            }
+            if let Some(u) = url {
+                images.push(Attachment {
+                    url: Some(u),
+                    filename: String::from("image.jpg"),
+                    content_type: Some("image/jpeg".into()),
+                    data: None,
+                });
+            }
+        } else {
+            i += 1;
+        }
+    }
+    images
+}
+
 pub async fn handle_message(event: Event, bridges: &Bridges) {
     if bridges.is_self_qq(event.user_id) {
         return;
@@ -85,22 +137,24 @@ pub async fn handle_message(event: Event, bridges: &Bridges) {
         }
     });
 
-    // Decode HTML entities first (e.g. &amp; → &), then parse CQ reply
-    // from the raw message BEFORE stripping, so the reply ID survives.
+    // Decode HTML entities first (e.g. &amp; → &), then parse CQ reply / images
+    // from the raw message BEFORE stripping, so the reply ID and image URLs survive.
     let text = htmlescape::decode_html(&event.message).unwrap_or_else(|_| event.message.clone());
     let reply_to_msg_id =
         extract_reply_id(&text).or_else(|| event.reply.map(|r| r.message_id.to_string()));
+    let images = extract_images(&text);
     let filtered = strip_cq_codes(&text);
-    if filtered.is_empty() {
+    if filtered.is_empty() && images.is_empty() {
         return;
     }
 
-    info!("qq -> discord: [{name}] {filtered}");
+    info!("qq -> : [{name}] {filtered} (+{} images)", images.len());
     let msg = QQMessage {
         msg_id: event.message_id.to_string(),
         sender_name: name.to_string(),
         content: filtered,
         reply_to_msg_id,
+        attachments: images,
     };
     bridge.forward(&msg).await;
 }

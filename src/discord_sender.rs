@@ -21,15 +21,17 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serenity::all::MessageId;
-use serenity::builder::CreateMessage;
-use tracing::error;
+use serenity::builder::{CreateAttachment, CreateMessage};
+use tracing::{error, warn};
 
 use crate::error::AnemoneBotError;
 use crate::message::{Message, Platform};
+use crate::proxy::download_bytes;
 use crate::sender::PlatformSender;
 
 pub struct DiscordSender {
     pub http: Arc<OnceLock<Arc<serenity::http::Http>>>,
+    pub reqwest: reqwest::Client,
     pub channel_id: u64,
 }
 
@@ -70,6 +72,30 @@ impl PlatformSender for DiscordSender {
         };
 
         let mut text = format!("{prefix} {}: {}", msg.sender_name(), msg.content());
+
+        // Download and attach images
+        let mut files: Vec<CreateAttachment> = Vec::new();
+        for att in msg.attachments() {
+            let data = match (&att.url, &att.data) {
+                (_, Some(bytes)) => Some(bytes.clone()),
+                (Some(url), None) => match download_bytes(url, &self.reqwest).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        warn!("discord download image failed for {url}: {e}");
+                        text.push_str("[图片]");
+                        None
+                    }
+                },
+                (None, None) => {
+                    text.push_str("[图片]");
+                    None
+                }
+            };
+            if let Some(bytes) = data {
+                files.push(CreateAttachment::bytes(bytes, att.filename.clone()));
+            }
+        }
+
         truncate_to_limit(&mut text, 2000);
 
         let channel = serenity::model::id::ChannelId::new(self.channel_id);
@@ -80,6 +106,13 @@ impl PlatformSender for DiscordSender {
             if let Ok(id) = reply_id.parse::<u64>() {
                 builder = builder.reference_message((channel, MessageId::new(id)));
             }
+        }
+
+        for mut file in files {
+            if !file.filename.contains('.') {
+                file.filename.push_str(".jpg");
+            }
+            builder = builder.add_file(file);
         }
 
         match channel.send_message(http, builder).await {

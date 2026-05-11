@@ -17,10 +17,13 @@
 */
 
 use async_trait::async_trait;
+use reqwest::multipart::{Form, Part};
 use serde_json::json;
+use tracing::warn;
 
 use crate::error::AnemoneBotError;
 use crate::message::{Message, Platform};
+use crate::proxy::download_bytes;
 use crate::sender::PlatformSender;
 
 pub struct TelegramSender {
@@ -35,6 +38,7 @@ impl PlatformSender for TelegramSender {
         Platform::Telegram
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn send(
         &self,
         msg: &dyn Message,
@@ -46,26 +50,138 @@ impl PlatformSender for TelegramSender {
             Platform::Telegram => unreachable!("bridge filters own platform"),
         };
 
-        let text = format!("{prefix} {}: {}", msg.sender_name(), msg.content());
+        let mut text = format!("{prefix} {}: {}", msg.sender_name(), msg.content());
 
-        let mut body = json!({
-            "chat_id": self.chat_id,
-            "text": text,
-        });
+        // Download images
+        let mut image_data: Vec<(Vec<u8>, String)> = Vec::new();
+        for att in msg.attachments() {
+            let data = match (&att.url, &att.data) {
+                (_, Some(bytes)) => Some(bytes.clone()),
+                (Some(url), None) => match download_bytes(url, &self.http).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        warn!("telegram download image failed for {url}: {e}");
+                        text.push_str("[图片]");
+                        None
+                    }
+                },
+                (None, None) => {
+                    text.push_str("[图片]");
+                    None
+                }
+            };
+            if let Some(bytes) = data {
+                let fname = att.filename.clone();
+                image_data.push((bytes, fname));
+            }
+        }
+
+        let api_url = format!("https://api.telegram.org/bot{}", self.token);
+
+        if image_data.is_empty() {
+            // Text only — sendMessage
+            let mut body = json!({
+                "chat_id": self.chat_id,
+                "text": text,
+            });
+            if let Some(ref reply_id) = reply_to_msg_id {
+                if let Ok(id) = reply_id.parse::<i64>() {
+                    body["reply_parameters"] = json!({"message_id": id});
+                }
+            }
+            let resp: serde_json::Value = self
+                .http
+                .post(format!("{api_url}/sendMessage"))
+                .json(&body)
+                .send()
+                .await?
+                .json()
+                .await?;
+            if !resp["ok"].as_bool().unwrap_or(false) {
+                return Err(AnemoneBotError::WebSocket(format!(
+                    "telegram sendMessage failed: {}",
+                    resp["description"].as_str().unwrap_or("unknown")
+                )));
+            }
+            return resp["result"]["message_id"]
+                .as_i64()
+                .map(|id| id.to_string())
+                .ok_or_else(|| {
+                    AnemoneBotError::WebSocket("missing message_id in response".into())
+                });
+        }
+
+        if image_data.len() == 1 {
+            // Single image — sendPhoto with caption
+            let (data, filename) = &image_data[0];
+            let mut form = Form::new()
+                .text("chat_id", self.chat_id.to_string())
+                .text("caption", text.clone())
+                .part(
+                    "photo",
+                    Part::bytes(data.clone()).file_name(filename.clone()),
+                );
+            if let Some(ref reply_id) = reply_to_msg_id {
+                if let Ok(id) = reply_id.parse::<i64>() {
+                    form = form.text("reply_parameters", json!({"message_id": id}).to_string());
+                }
+            }
+            let resp: serde_json::Value = self
+                .http
+                .post(format!("{api_url}/sendPhoto"))
+                .multipart(form)
+                .send()
+                .await?
+                .json()
+                .await?;
+            if !resp["ok"].as_bool().unwrap_or(false) {
+                return Err(AnemoneBotError::WebSocket(format!(
+                    "telegram sendPhoto failed: {}",
+                    resp["description"].as_str().unwrap_or("unknown")
+                )));
+            }
+            return resp["result"]["message_id"]
+                .as_i64()
+                .map(|id| id.to_string())
+                .ok_or_else(|| {
+                    AnemoneBotError::WebSocket("missing message_id in response".into())
+                });
+        }
+
+        // Multiple images — sendMediaGroup with caption on first photo
+        let mut media: Vec<serde_json::Value> = Vec::new();
+        for (i, (_data, _fname)) in image_data.iter().enumerate() {
+            let mut item = json!({
+                "type": "photo",
+                "media": format!("attach://file{i}"),
+            });
+            if i == 0 && !text.is_empty() {
+                item["caption"] = json!(text);
+            }
+            media.push(item);
+        }
+
+        let mut form = Form::new()
+            .text("chat_id", self.chat_id.to_string())
+            .text("media", serde_json::to_string(&media)?);
+
+        for (i, (data, filename)) in image_data.iter().enumerate() {
+            form = form.part(
+                format!("file{i}"),
+                Part::bytes(data.clone()).file_name(filename.clone()),
+            );
+        }
 
         if let Some(ref reply_id) = reply_to_msg_id {
             if let Ok(id) = reply_id.parse::<i64>() {
-                body["reply_parameters"] = json!({"message_id": id});
+                form = form.text("reply_parameters", json!({"message_id": id}).to_string());
             }
         }
 
         let resp: serde_json::Value = self
             .http
-            .post(format!(
-                "https://api.telegram.org/bot{}/sendMessage",
-                self.token
-            ))
-            .json(&body)
+            .post(format!("{api_url}/sendMediaGroup"))
+            .multipart(form)
             .send()
             .await?
             .json()
@@ -73,14 +189,19 @@ impl PlatformSender for TelegramSender {
 
         if !resp["ok"].as_bool().unwrap_or(false) {
             return Err(AnemoneBotError::WebSocket(format!(
-                "telegram sendMessage failed: {}",
+                "telegram sendMediaGroup failed: {}",
                 resp["description"].as_str().unwrap_or("unknown")
             )));
         }
 
-        resp["result"]["message_id"]
-            .as_i64()
+        // Return the first message_id from the media group
+        resp["result"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|m| m["message_id"].as_i64())
             .map(|id| id.to_string())
-            .ok_or_else(|| AnemoneBotError::WebSocket("missing message_id in response".into()))
+            .ok_or_else(|| {
+                AnemoneBotError::WebSocket("missing message_id in sendMediaGroup response".into())
+            })
     }
 }

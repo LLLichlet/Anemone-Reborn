@@ -22,7 +22,8 @@ use tracing::{error, info};
 
 use crate::bridge::{Bridges, TelegramContext};
 use crate::error::AnemoneBotError;
-use crate::message::TelegramMessage;
+use crate::message::{Attachment, TelegramMessage};
+use tracing::warn;
 
 fn sender_name(from: &serde_json::Value) -> String {
     let first = from["first_name"].as_str().unwrap_or("");
@@ -39,6 +40,26 @@ fn sender_name(from: &serde_json::Value) -> String {
     }
 }
 
+/// Resolve a Telegram `file_id` into a `file_path` via `getFile`.
+async fn get_file_path(
+    http: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<String, AnemoneBotError> {
+    let resp: serde_json::Value = http
+        .get(format!(
+            "https://api.telegram.org/bot{token}/getFile?file_id={file_id}"
+        ))
+        .send()
+        .await?
+        .json()
+        .await?;
+    resp["result"]["file_path"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| AnemoneBotError::WebSocket("getFile: missing file_path".into()))
+}
+
 /// Get the bot's own user ID via `getMe`.
 async fn get_self_id(http: &reqwest::Client, token: &str) -> Result<i64, AnemoneBotError> {
     let resp: serde_json::Value = http
@@ -52,6 +73,7 @@ async fn get_self_id(http: &reqwest::Client, token: &str) -> Result<i64, Anemone
         .ok_or_else(|| AnemoneBotError::WebSocket("getMe: missing id".into()))
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(bridges: Arc<Bridges>, ctx: &TelegramContext) -> Result<(), AnemoneBotError> {
     let self_id = get_self_id(&ctx.http, &ctx.token).await?;
     bridges.set_telegram_self_id(self_id);
@@ -124,7 +146,33 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &TelegramContext) -> Result<(), Ane
             };
 
             let text = msg["text"].as_str().unwrap_or("");
-            if text.is_empty() {
+
+            // Parse photo attachments (largest size = last in array)
+            let mut images: Vec<Attachment> = Vec::new();
+            if let Some(photos) = msg["photo"].as_array() {
+                if let Some(largest) = photos.last() {
+                    let file_id = largest["file_id"].as_str().unwrap_or("");
+                    if !file_id.is_empty() {
+                        match get_file_path(&ctx.http, &ctx.token, file_id).await {
+                            Ok(file_path) => {
+                                let url = format!(
+                                    "https://api.telegram.org/file/bot{}/{}",
+                                    ctx.token, file_path
+                                );
+                                images.push(Attachment {
+                                    url: Some(url),
+                                    filename: format!("{file_id}.jpg"),
+                                    content_type: Some("image/jpeg".into()),
+                                    data: None,
+                                });
+                            }
+                            Err(e) => warn!("telegram getFile failed: {e}"),
+                        }
+                    }
+                }
+            }
+
+            if text.is_empty() && images.is_empty() {
                 continue;
             }
 
@@ -134,12 +182,13 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &TelegramContext) -> Result<(), Ane
                 .as_i64()
                 .map(|id| id.to_string());
 
-            info!("telegram -> : [{name}] {text}");
+            info!("telegram -> : [{name}] {text} (+{} images)", images.len());
             let tg_msg = TelegramMessage {
                 msg_id,
                 sender_name: name,
                 content: text.to_string(),
                 reply_to_msg_id,
+                attachments: images,
             };
             bridge.forward(&tg_msg).await;
         }

@@ -40,12 +40,14 @@ pub struct DiscordContext {
     pub self_id: Arc<OnceLock<u64>>,
     pub token: String,
     pub proxy: Option<String>,
+    pub http: reqwest::Client,
 }
 
 pub struct QQContext {
     pub tx: UnboundedSender<String>,
     pub pending: PendingMap,
     pub self_id: Arc<OnceLock<i64>>,
+    pub http: reqwest::Client,
 }
 
 pub struct TelegramContext {
@@ -239,6 +241,7 @@ impl Bridges {
                 parts.push(format!("d_{ch}"));
                 senders.push(Box::new(DiscordSender {
                     http: dc.http_lock.clone(),
+                    reqwest: dc.http.clone(),
                     channel_id: ch,
                 }));
             }
@@ -247,6 +250,7 @@ impl Bridges {
                 senders.push(Box::new(QQSender {
                     tx: qc.tx.clone(),
                     pending: qc.pending.clone(),
+                    reqwest: qc.http.clone(),
                     group_id: grp,
                 }));
             }

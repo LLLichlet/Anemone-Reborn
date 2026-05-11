@@ -26,3 +26,12 @@ pub fn build_reqwest_client(proxy_url: Option<&str>) -> Result<reqwest::Client, 
     }
     Ok(builder.build()?)
 }
+
+/// Download raw bytes from a URL. Used by senders to fetch image data before re-uploading.
+pub async fn download_bytes(
+    url: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<u8>, AnemoneBotError> {
+    let resp = client.get(url).send().await?;
+    Ok(resp.bytes().await?.to_vec())
+}

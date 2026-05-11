@@ -16,6 +16,16 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/// Image or file attachment extracted from an incoming message.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Attachment {
+    pub url: Option<String>,
+    pub data: Option<Vec<u8>>,
+    pub filename: String,
+    pub content_type: Option<String>,
+}
+
 /// Platform-agnostic message trait.
 ///
 /// Each platform implements this trait on its own struct, so platform-specific
@@ -28,6 +38,9 @@ pub trait Message: Sync {
     fn source(&self) -> Platform;
     fn reply_to_msg_id(&self) -> Option<&str> {
         None
+    }
+    fn attachments(&self) -> &[Attachment] {
+        &[]
     }
 }
 
@@ -43,6 +56,7 @@ pub struct QQMessage {
     pub sender_name: String,
     pub content: String,
     pub reply_to_msg_id: Option<String>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message for QQMessage {
@@ -61,6 +75,9 @@ impl Message for QQMessage {
     fn reply_to_msg_id(&self) -> Option<&str> {
         self.reply_to_msg_id.as_deref()
     }
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
 }
 
 pub struct DiscordMessage {
@@ -68,6 +85,7 @@ pub struct DiscordMessage {
     pub sender_name: String,
     pub content: String,
     pub reply_to_msg_id: Option<String>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message for DiscordMessage {
@@ -86,6 +104,9 @@ impl Message for DiscordMessage {
     fn reply_to_msg_id(&self) -> Option<&str> {
         self.reply_to_msg_id.as_deref()
     }
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
 }
 
 pub struct TelegramMessage {
@@ -93,6 +114,7 @@ pub struct TelegramMessage {
     pub sender_name: String,
     pub content: String,
     pub reply_to_msg_id: Option<String>,
+    pub attachments: Vec<Attachment>,
 }
 
 impl Message for TelegramMessage {
@@ -110,6 +132,9 @@ impl Message for TelegramMessage {
     }
     fn reply_to_msg_id(&self) -> Option<&str> {
         self.reply_to_msg_id.as_deref()
+    }
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
     }
 }
 

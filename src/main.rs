@@ -75,6 +75,9 @@ async fn main() -> Result<(), AnemoneBotError> {
     let store = Arc::new(MessageStore::new("anemone-bot.db")?);
     store.prune(604_800)?;
 
+    // --- shared HTTP client -------------------------------------------------
+    let http_client = build_reqwest_client(config.http_proxy.as_deref())?;
+
     // --- per-platform contexts ----------------------------------------------
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
@@ -84,6 +87,7 @@ async fn main() -> Result<(), AnemoneBotError> {
             tx,
             pending: pending.clone(),
             self_id: Arc::new(OnceLock::new()),
+            http: http_client.clone(),
         };
         (Some(ctx), Some(rx))
     } else {
@@ -95,6 +99,7 @@ async fn main() -> Result<(), AnemoneBotError> {
         self_id: Arc::new(OnceLock::new()),
         token: token.clone(),
         proxy: config.http_proxy.clone(),
+        http: http_client.clone(),
     });
 
     let telegram_ctx = config
@@ -102,7 +107,7 @@ async fn main() -> Result<(), AnemoneBotError> {
         .as_ref()
         .map(|token| -> Result<_, AnemoneBotError> {
             Ok(TelegramContext {
-                http: build_reqwest_client(config.http_proxy.as_deref())?,
+                http: http_client.clone(),
                 self_id: Arc::new(OnceLock::new()),
                 token: token.clone(),
             })
@@ -126,6 +131,7 @@ async fn main() -> Result<(), AnemoneBotError> {
             self_id: dc.self_id.clone(),
             token: dc.token.clone(),
             proxy: dc.proxy.clone(),
+            http: dc.http.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = discord_client::run(bridges_for_discord, &ctx).await {

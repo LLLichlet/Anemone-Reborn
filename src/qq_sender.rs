@@ -16,16 +16,22 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::fmt::Write;
+
 use async_trait::async_trait;
+use base64::prelude::*;
+use tracing::warn;
 
 use crate::error::AnemoneBotError;
 use crate::message::{Message, Platform};
 use crate::onebot_api::Api;
+use crate::proxy::download_bytes;
 use crate::sender::PlatformSender;
 
 pub struct QQSender {
     pub tx: tokio::sync::mpsc::UnboundedSender<String>,
     pub pending: crate::onebot_api::PendingMap,
+    pub reqwest: reqwest::Client,
     pub group_id: i64,
 }
 
@@ -47,6 +53,29 @@ impl PlatformSender for QQSender {
         };
 
         let mut text = format!("{prefix} {}: {}", msg.sender_name(), msg.content());
+
+        // Download images and append as CQ codes
+        for att in msg.attachments() {
+            let data = match (&att.url, &att.data) {
+                (_, Some(bytes)) => Some(bytes.clone()),
+                (Some(url), None) => match download_bytes(url, &self.reqwest).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(e) => {
+                        warn!("qq download image failed for {url}: {e}");
+                        text.push_str("[图片]");
+                        None
+                    }
+                },
+                (None, None) => {
+                    text.push_str("[图片]");
+                    None
+                }
+            };
+            if let Some(bytes) = data {
+                let b64 = BASE64_STANDARD.encode(&bytes);
+                let _ = write!(text, "[CQ:image,file=base64://{b64}]");
+            }
+        }
 
         if let Some(ref reply_id) = reply_to_msg_id {
             text = format!("[CQ:reply,id={reply_id}]{text}");

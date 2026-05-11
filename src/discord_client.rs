@@ -30,7 +30,7 @@ use tracing::{error, info, warn};
 
 use crate::bridge::{Bridges, DiscordContext};
 use crate::error::AnemoneBotError;
-use crate::message::DiscordMessage;
+use crate::message::{Attachment, DiscordMessage};
 use crate::proxy::build_reqwest_client;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
@@ -276,16 +276,34 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), Anem
                                         })
                                         .map(String::from);
 
-                                    if !content.is_empty() {
-                                        info!("discord -> qq: [{name}] {content}");
-                                        let msg = DiscordMessage {
-                                            msg_id: msg_id.to_string(),
-                                            sender_name: name.to_string(),
-                                            content: content.to_string(),
-                                            reply_to_msg_id,
-                                        };
-                                        bridge.forward(&msg).await;
+                                    let attachments: Vec<Attachment> = payload["d"]["attachments"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter(|a| {
+                                            a["content_type"].as_str().unwrap_or("").starts_with("image/")
+                                        })
+                                        .map(|a| Attachment {
+                                            url: a["url"].as_str().map(String::from),
+                                            filename: a["filename"].as_str().unwrap_or("image").to_string(),
+                                            content_type: a["content_type"].as_str().map(String::from),
+                                            data: None,
+                                        })
+                                        .collect();
+
+                                    if content.is_empty() && attachments.is_empty() {
+                                        continue;
                                     }
+
+                                    info!("discord -> : [{name}] {content} (+{} images)", attachments.len());
+                                    let msg = DiscordMessage {
+                                        msg_id: msg_id.to_string(),
+                                        sender_name: name.to_string(),
+                                        content: content.to_string(),
+                                        reply_to_msg_id,
+                                        attachments,
+                                    };
+                                    bridge.forward(&msg).await;
                                 }
                                 _ => {}
                             }
