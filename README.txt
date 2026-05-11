@@ -16,7 +16,7 @@ Telegram: create a bot via @BotFather → /newbot → copy token
 Fill your credentials into anemone-bot.toml.
 
 The anemone-bot.toml is as following:
---------------------------------------------------
+-------------------------------------------------------------------------------
 # QQ / NapCat (optional — omit to skip QQ)
 bind_addr = "0.0.0.0:<your-napcat-port>"
 
@@ -46,7 +46,7 @@ telegram_group_id = <telegram-chat-id>   # negative for supergroups
 [[bridges]]
 qq_group_id = <qq-group-id>
 telegram_group_id = <telegram-chat-id>
---------------------------------------------------
+-------------------------------------------------------------------------------
 
 After configuration, run the program using `cargo run`.
 
