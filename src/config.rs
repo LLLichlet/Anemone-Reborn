@@ -29,6 +29,8 @@ pub struct BridgeConfig {
     pub qq_group_id: Option<i64>,
     #[serde(default)]
     pub telegram_group_id: Option<i64>,
+    #[serde(default)]
+    pub matrix_room_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -41,6 +43,10 @@ pub struct AppConfig {
     pub discord_token: Option<String>,
     #[serde(default)]
     pub telegram_token: Option<String>,
+    #[serde(default)]
+    pub matrix_token: Option<String>,
+    #[serde(default, alias = "matrix_homeserver")]
+    pub matrix_homeserver_url: Option<String>,
     #[serde(default)]
     pub http_proxy: Option<String>,
     pub bridges: Vec<BridgeConfig>,

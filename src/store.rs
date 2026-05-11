@@ -62,6 +62,7 @@ impl MessageStore {
             Platform::QQ => "qq",
             Platform::Discord => "discord",
             Platform::Telegram => "telegram",
+            Platform::Matrix => "matrix",
         }
     }
 
@@ -69,6 +70,7 @@ impl MessageStore {
         match s {
             "discord" => Platform::Discord,
             "telegram" => Platform::Telegram,
+            "matrix" => Platform::Matrix,
             _ => Platform::QQ,
         }
     }
@@ -113,6 +115,7 @@ impl MessageStore {
         let mut discord_id = None;
         let mut qq_id = None;
         let mut telegram_id = None;
+        let mut matrix_id = None;
 
         let mut set = |plat: &str, id: String, is_src: bool| {
             if is_src {
@@ -120,6 +123,7 @@ impl MessageStore {
                     "discord" => discord_id = Some(id),
                     "qq" => qq_id = Some(id),
                     "telegram" => telegram_id = Some(id),
+                    "matrix" => matrix_id = Some(id),
                     _ => {}
                 }
             }
@@ -134,6 +138,7 @@ impl MessageStore {
             discord_msg_id: discord_id,
             qq_msg_id: qq_id,
             telegram_msg_id: telegram_id,
+            matrix_msg_id: matrix_id,
         }))
     }
 

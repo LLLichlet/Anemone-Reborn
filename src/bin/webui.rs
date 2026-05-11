@@ -43,6 +43,7 @@ struct WebUiState {
     log_ring: Arc<LogRing>,
     config_path: PathBuf,
     qq_runtime: Arc<Mutex<Option<QQRuntime>>>,
+    webui_addr: String,
 }
 
 #[tokio::main]
@@ -62,9 +63,7 @@ async fn main() -> Result<(), AnemoneBotError> {
         .with_writer(BroadcastWriter::new(log_ring.sender()))
         .with_ansi(false)
         .with_filter(filter);
-    tracing_subscriber::registry()
-        .with(ring_layer)
-        .init();
+    tracing_subscriber::registry().with(ring_layer).init();
 
     let config_path = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -80,6 +79,7 @@ async fn main() -> Result<(), AnemoneBotError> {
         log_ring,
         config_path,
         qq_runtime: qq_runtime.clone(),
+        webui_addr: webui_addr.clone(),
     });
 
     let app = Router::new()
@@ -108,6 +108,7 @@ async fn main() -> Result<(), AnemoneBotError> {
         });
     }
 
+    println!("webui listening on http://{webui_addr}");
     info!("webui listening on http://{webui_addr}");
     let listener = TcpListener::bind(&webui_addr).await?;
     axum::serve(listener, app).await?;
@@ -156,6 +157,7 @@ const INDEX_HTML: &str = r#"<!DOCTYPE html>
   <span class="platform-indicator">Discord: <b id="disc-ind" class="conn-off">-</b></span>
   <span class="platform-indicator">QQ: <b id="qq-ind" class="conn-off">-</b></span>
   <span class="platform-indicator">Telegram: <b id="tg-ind" class="conn-off">-</b></span>
+  <span class="platform-indicator">Matrix: <b id="mx-ind" class="conn-off">-</b></span>
   <br>
   <button id="ctrl-btn" onclick="toggleBot()">Start Bot</button>
 </div>
@@ -198,6 +200,7 @@ async function updateStatus() {
     ci('disc-ind', s.discord_connected, s.discord_configured);
     ci('qq-ind', s.qq_connected, s.qq_configured);
     ci('tg-ind', s.telegram_connected, s.telegram_configured);
+    ci('mx-ind', s.matrix_connected, s.matrix_configured);
   } catch (e) { console.error('status error:', e); }
 }
 
@@ -349,7 +352,15 @@ async fn logs_sse(
     let mut rx = state.log_ring.subscribe();
     let (tx, mpsc_rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
 
+    // Push the WebUI listening address as the first log line
+    let addr = state.webui_addr.clone();
     tokio::spawn(async move {
+        let _ = tx
+            .send(Ok(Event::default().data(format!(
+                "webui listening on http://{addr}\n"
+            ))))
+            .await;
+
         loop {
             match rx.recv().await {
                 Ok(line) => {

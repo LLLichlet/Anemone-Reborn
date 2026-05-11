@@ -2,6 +2,9 @@ Anemone-bot is a message forwarding bot that connects various chat platforms,
 improving reusability through a unified message trait.
 
 Supported platforms: Discord, QQ (via NapCat/OneBot v11), Telegram.
+Matrix support is EXPERIMENTAL — text forwarding works, but image forwarding
+to/from Matrix is not yet fully reliable and may drop images or show
+placeholders. Matrix rooms must be unencrypted (E2EE not supported).
 
 Features:
 Bidirectional text message forwarding with reply chain resolution.
@@ -12,6 +15,10 @@ Prerequisites:
 Discord: create a bot at https://discord.com/developers/applications → Bot → copy token
 QQ: install NapCat (https://github.com/NapNeko/NapCatQQ)
 Telegram: create a bot via @BotFather → /newbot → copy token
+Matrix: register an account on any homeserver (e.g. matrix.org via Element),
+then obtain the access token from Element → Settings → Help & About →
+Access Token. Notes: (1) the token changes if you delete the device/session;
+(2) Matrix rooms must be unencrypted — E2EE is not supported.
 
 Fill your credentials into anemone-bot.toml.
 
@@ -28,6 +35,12 @@ discord_token = "your-discord-bot-token"
 # NOTE: Telegram bots cannot see messages from other bots in the same group.
 telegram_token = "your-telegram-bot-token"
 
+# Matrix (experimental — omit to skip Matrix)
+# NOTE: Matrix rooms must be unencrypted (E2EE not supported).
+# NOTE: Image forwarding to/from Matrix is not yet fully reliable.
+matrix_token = "your-matrix-access-token"
+matrix_homeserver = "https://matrix.org"
+
 # Optional WebUI management interface bind address (default 127.0.0.1:3000)
 # webui_bind_addr = "127.0.0.1:3000"
 
@@ -42,6 +55,7 @@ telegram_token = "your-telegram-bot-token"
 discord_channel_id = <discord-channel-id>
 qq_group_id = <qq-group-id>
 telegram_group_id = <telegram-chat-id>   # negative for supergroups
+matrix_room_id = "<matrix-room-id>"      # e.g. "!abc123:matrix.org"
 
 [[bridges]]
 qq_group_id = <qq-group-id>
@@ -76,7 +90,7 @@ A native desktop GUI built with the Iced framework is available via the
 
 The GUI provides the same management features as the WebUI: a status bar
 with bot running/stopped indicator and per-platform connection status
-(Discord, QQ, Telegram), a Start/Stop button, a TOML config editor with
+(Discord, QQ, Telegram, Matrix), a Start/Stop button, a TOML config editor with
 Reload, Save, and inline validation feedback, and a live log viewer with
 auto-scroll capped at 800 lines.
 

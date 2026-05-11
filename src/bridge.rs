@@ -26,6 +26,7 @@ use tracing::{error, info, warn};
 
 use crate::config::BridgeConfig;
 use crate::discord_sender::DiscordSender;
+use crate::matrix_sender::MatrixSender;
 use crate::message::Message;
 use crate::onebot_api::PendingMap;
 use crate::qq_sender::QQSender;
@@ -56,6 +57,13 @@ pub struct TelegramContext {
     pub token: String,
 }
 
+pub struct MatrixContext {
+    pub http: reqwest::Client,
+    pub self_id: Arc<OnceLock<String>>,
+    pub token: String,
+    pub homeserver_url: String,
+}
+
 // -- Bridge -------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -66,6 +74,7 @@ pub struct Bridge {
     qq_self_id: Arc<OnceLock<i64>>,
     discord_self_id: Arc<OnceLock<u64>>,
     telegram_self_id: Arc<OnceLock<i64>>,
+    matrix_self_id: Arc<OnceLock<String>>,
     ready: Arc<AtomicBool>,
 }
 
@@ -90,6 +99,7 @@ impl Bridge {
         qq_self_id: Arc<OnceLock<i64>>,
         discord_self_id: Arc<OnceLock<u64>>,
         telegram_self_id: Arc<OnceLock<i64>>,
+        matrix_self_id: Arc<OnceLock<String>>,
         ready: Arc<AtomicBool>,
     ) -> Self {
         Self {
@@ -99,6 +109,7 @@ impl Bridge {
             qq_self_id,
             discord_self_id,
             telegram_self_id,
+            matrix_self_id,
             ready,
         }
     }
@@ -117,6 +128,10 @@ impl Bridge {
         let _ = self.telegram_self_id.set(id);
     }
 
+    pub fn set_matrix_self_id(&self, id: String) {
+        let _ = self.matrix_self_id.set(id);
+    }
+
     pub fn is_self_qq(&self, user_id: i64) -> bool {
         self.qq_self_id.get() == Some(&user_id)
     }
@@ -127,6 +142,10 @@ impl Bridge {
 
     pub fn is_self_telegram(&self, user_id: i64) -> bool {
         self.telegram_self_id.get() == Some(&user_id)
+    }
+
+    pub fn is_self_matrix(&self, user_id: &str) -> bool {
+        self.matrix_self_id.get().map(String::as_str) == Some(user_id)
     }
 
     // -- forwarding ----------------------------------------------------------
@@ -201,10 +220,12 @@ pub struct Bridges {
     by_discord: HashMap<u64, Bridge>,
     by_qq: HashMap<i64, Bridge>,
     by_telegram: HashMap<i64, Bridge>,
+    by_matrix: HashMap<String, Bridge>,
     ready: Arc<AtomicBool>,
     disc_self_id: Option<Arc<OnceLock<u64>>>,
     qq_self_id: Option<Arc<OnceLock<i64>>>,
     tg_self_id: Option<Arc<OnceLock<i64>>>,
+    matrix_self_id: Option<Arc<OnceLock<String>>>,
 }
 
 impl Bridges {
@@ -214,24 +235,35 @@ impl Bridges {
         discord: Option<&DiscordContext>,
         qq: Option<&QQContext>,
         telegram: Option<&TelegramContext>,
+        matrix: Option<&MatrixContext>,
         store: &Arc<MessageStore>,
     ) -> Self {
         let mut by_discord = HashMap::new();
         let mut by_qq = HashMap::new();
         let mut by_telegram = HashMap::new();
+        let mut by_matrix = HashMap::new();
 
         let ready = Arc::new(AtomicBool::new(false));
 
-        let (empty_i64, empty_u64): (Arc<OnceLock<i64>>, Arc<OnceLock<u64>>) =
-            (Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+        let (empty_i64, empty_u64, empty_string): (
+            Arc<OnceLock<i64>>,
+            Arc<OnceLock<u64>>,
+            Arc<OnceLock<String>>,
+        ) = (
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+        );
 
         let disc_self_id = discord.map(|c| c.self_id.clone());
         let qq_self_id = qq.map(|c| c.self_id.clone());
         let tg_self_id = telegram.map(|c| c.self_id.clone());
+        let matrix_self_id = matrix.map(|c| c.self_id.clone());
 
         let d_id = disc_self_id.as_ref().map_or(&empty_u64, |l| l);
         let q_id = qq_self_id.as_ref().map_or(&empty_i64, |l| l);
         let t_id = tg_self_id.as_ref().map_or(&empty_i64, |l| l);
+        let m_id = matrix_self_id.as_ref().map_or(&empty_string, |l| l);
 
         for (i, cfg) in configs.iter().enumerate() {
             let mut parts: Vec<String> = Vec::new();
@@ -262,6 +294,15 @@ impl Bridges {
                     chat_id: chat,
                 }));
             }
+            if let (Some(mc), Some(room)) = (matrix, cfg.matrix_room_id.as_ref()) {
+                parts.push(format!("m_{room}"));
+                senders.push(Box::new(MatrixSender {
+                    http: mc.http.clone(),
+                    token: mc.token.clone(),
+                    homeserver_url: mc.homeserver_url.clone(),
+                    room_id: room.clone(),
+                }));
+            }
 
             if senders.len() < 2 {
                 warn!(
@@ -279,6 +320,7 @@ impl Bridges {
                 q_id.clone(),
                 d_id.clone(),
                 t_id.clone(),
+                m_id.clone(),
                 ready.clone(),
             );
 
@@ -289,7 +331,10 @@ impl Bridges {
                 by_qq.insert(grp, bridge.clone());
             }
             if let Some(chat) = cfg.telegram_group_id {
-                by_telegram.insert(chat, bridge);
+                by_telegram.insert(chat, bridge.clone());
+            }
+            if let Some(room) = cfg.matrix_room_id.as_ref() {
+                by_matrix.insert(room.clone(), bridge);
             }
         }
 
@@ -297,17 +342,23 @@ impl Bridges {
             by_discord,
             by_qq,
             by_telegram,
+            by_matrix,
             ready,
             disc_self_id,
             qq_self_id,
             tg_self_id,
+            matrix_self_id,
         }
     }
 
     fn check_ready(&self) {
         let ok = self.disc_self_id.as_ref().is_none_or(|l| l.get().is_some())
             && self.qq_self_id.as_ref().is_none_or(|l| l.get().is_some())
-            && self.tg_self_id.as_ref().is_none_or(|l| l.get().is_some());
+            && self.tg_self_id.as_ref().is_none_or(|l| l.get().is_some())
+            && self
+                .matrix_self_id
+                .as_ref()
+                .is_none_or(|l| l.get().is_some());
         if ok {
             self.ready.store(true, Ordering::SeqCst);
         }
@@ -323,6 +374,10 @@ impl Bridges {
 
     pub fn by_telegram(&self, chat_id: i64) -> Option<&Bridge> {
         self.by_telegram.get(&chat_id)
+    }
+
+    pub fn by_matrix(&self, room_id: &str) -> Option<&Bridge> {
+        self.by_matrix.get(room_id)
     }
 
     pub fn is_self_discord(&self, user_id: u64) -> bool {
@@ -346,6 +401,13 @@ impl Bridges {
             .is_some_and(|b| b.is_self_telegram(user_id))
     }
 
+    pub fn is_self_matrix(&self, user_id: &str) -> bool {
+        self.by_matrix
+            .values()
+            .next()
+            .is_some_and(|b| b.is_self_matrix(user_id))
+    }
+
     pub fn set_qq_self_id(&self, id: i64) {
         if let Some(bridge) = self.by_qq.values().next() {
             bridge.set_qq_self_id(id);
@@ -363,6 +425,13 @@ impl Bridges {
     pub fn set_telegram_self_id(&self, id: i64) {
         if let Some(bridge) = self.by_telegram.values().next() {
             bridge.set_telegram_self_id(id);
+        }
+        self.check_ready();
+    }
+
+    pub fn set_matrix_self_id(&self, id: String) {
+        if let Some(bridge) = self.by_matrix.values().next() {
+            bridge.set_matrix_self_id(id);
         }
         self.check_ready();
     }

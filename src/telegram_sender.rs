@@ -47,6 +47,7 @@ impl PlatformSender for TelegramSender {
         let prefix = match msg.source() {
             Platform::Discord => "[Discord]",
             Platform::QQ => "[QQ]",
+            Platform::Matrix => "[Matrix]",
             Platform::Telegram => unreachable!("bridge filters own platform"),
         };
 

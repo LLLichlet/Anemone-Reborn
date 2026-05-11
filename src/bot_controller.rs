@@ -33,7 +33,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
-use crate::bridge::{Bridges, DiscordContext, QQContext, TelegramContext};
+use crate::bridge::{Bridges, DiscordContext, MatrixContext, QQContext, TelegramContext};
 use crate::config::{self, AppConfig};
 use crate::error::AnemoneBotError;
 use crate::onebot_api::PendingMap;
@@ -49,9 +49,11 @@ pub struct BotStatus {
     pub discord_configured: bool,
     pub qq_configured: bool,
     pub telegram_configured: bool,
+    pub matrix_configured: bool,
     pub discord_connected: bool,
     pub qq_connected: bool,
     pub telegram_connected: bool,
+    pub matrix_connected: bool,
 }
 
 // -- Bot controller -----------------------------------------------------------
@@ -66,6 +68,7 @@ struct BotInner {
     discord_connected: Arc<AtomicBool>,
     qq_connected: Arc<AtomicBool>,
     telegram_connected: Arc<AtomicBool>,
+    matrix_connected: Arc<AtomicBool>,
 }
 
 pub struct BotHandle {
@@ -92,6 +95,7 @@ impl BotController {
                 discord_connected: Arc::new(AtomicBool::new(false)),
                 qq_connected: Arc::new(AtomicBool::new(false)),
                 telegram_connected: Arc::new(AtomicBool::new(false)),
+                matrix_connected: Arc::new(AtomicBool::new(false)),
             }),
         }
     }
@@ -110,6 +114,7 @@ impl BotController {
         inner.discord_connected.store(false, Ordering::SeqCst);
         inner.qq_connected.store(false, Ordering::SeqCst);
         inner.telegram_connected.store(false, Ordering::SeqCst);
+        inner.matrix_connected.store(false, Ordering::SeqCst);
 
         let store = Arc::new(MessageStore::new("anemone-bot.db")?);
         store.prune(604_800)?;
@@ -153,12 +158,27 @@ impl BotController {
             })
             .transpose()?;
 
+        let matrix_ctx = config
+            .matrix_token
+            .as_ref()
+            .zip(config.matrix_homeserver_url.as_ref())
+            .map(|(token, homeserver_url)| -> Result<_, AnemoneBotError> {
+                Ok(MatrixContext {
+                    http: http_client.clone(),
+                    self_id: Arc::new(OnceLock::new()),
+                    token: token.clone(),
+                    homeserver_url: homeserver_url.clone(),
+                })
+            })
+            .transpose()?;
+
         // -- bridges -----------------------------------------------------------
         let bridges = Arc::new(Bridges::new(
             &config.bridges,
             discord_ctx.as_ref(),
             qq_ctx.as_ref(),
             telegram_ctx.as_ref(),
+            matrix_ctx.as_ref(),
             &store,
         ));
 
@@ -198,6 +218,24 @@ impl BotController {
             });
         }
 
+        // -- spawn Matrix client -----------------------------------------------
+        if let Some(ref mc) = matrix_ctx {
+            let b = bridges.clone();
+            let ctx = MatrixContext {
+                http: mc.http.clone(),
+                self_id: mc.self_id.clone(),
+                token: mc.token.clone(),
+                homeserver_url: mc.homeserver_url.clone(),
+            };
+            let cancel_clone = cancel.clone();
+            let conn = inner.matrix_connected.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::matrix_client::run(b, &ctx, cancel_clone, conn).await {
+                    error!("matrix client fatal: {e}");
+                }
+            });
+        }
+
         inner.handle = Some(BotHandle {
             cancel: cancel.clone(),
         });
@@ -214,10 +252,11 @@ impl BotController {
         });
 
         info!(
-            "bot started (discord={}, qq={}, telegram={})",
+            "bot started (discord={}, qq={}, telegram={}, matrix={})",
             discord_ctx.is_some(),
             qq_ctx.is_some(),
             telegram_ctx.is_some(),
+            matrix_ctx.is_some(),
         );
 
         Ok(qq_runtime)
@@ -242,9 +281,11 @@ impl BotController {
             discord_configured: config.discord_token.is_some(),
             qq_configured: config.bind_addr.is_some(),
             telegram_configured: config.telegram_token.is_some(),
+            matrix_configured: config.matrix_token.is_some(),
             discord_connected: inner.discord_connected.load(Ordering::SeqCst),
             qq_connected: inner.qq_connected.load(Ordering::SeqCst),
             telegram_connected: inner.telegram_connected.load(Ordering::SeqCst),
+            matrix_connected: inner.matrix_connected.load(Ordering::SeqCst),
         }
     }
 

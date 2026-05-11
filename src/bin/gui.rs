@@ -54,9 +54,7 @@ fn main() -> iced::Result {
         .with_writer(BroadcastWriter::new(log_ring.sender()))
         .with_ansi(false)
         .with_filter(filter);
-    tracing_subscriber::registry()
-        .with(ring_layer)
-        .init();
+    tracing_subscriber::registry().with(ring_layer).init();
 
     let config_path = env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -122,9 +120,11 @@ impl GuiApp {
             discord_configured: false,
             qq_configured: false,
             telegram_configured: false,
+            matrix_configured: false,
             discord_connected: false,
             qq_connected: false,
             telegram_connected: false,
+            matrix_connected: false,
         };
 
         let app = Self {
@@ -164,8 +164,7 @@ impl GuiApp {
                                         tracing::warn!(
                                             "gui: onebot ws attempted but bot not started"
                                         );
-                                        axum::http::StatusCode::SERVICE_UNAVAILABLE
-                                            .into_response()
+                                        axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
                                     }
                                 }
                             }),
@@ -360,7 +359,8 @@ impl GuiApp {
 
             Message::ConfigSaved(err) => {
                 let is_ok = err.is_none();
-                let message = err.unwrap_or_else(|| "Saved. Changes take effect on next Start.".into());
+                let message =
+                    err.unwrap_or_else(|| "Saved. Changes take effect on next Start.".into());
                 self.save_feedback = Some(Feedback { message, is_ok });
                 Task::none()
             }
@@ -408,15 +408,17 @@ impl GuiApp {
             self.status.discord_configured,
             self.status.discord_connected,
         );
-        let qq_ind = GuiApp::platform_indicator(
-            "QQ",
-            self.status.qq_configured,
-            self.status.qq_connected,
-        );
+        let qq_ind =
+            GuiApp::platform_indicator("QQ", self.status.qq_configured, self.status.qq_connected);
         let tg_ind = GuiApp::platform_indicator(
             "Telegram",
             self.status.telegram_configured,
             self.status.telegram_connected,
+        );
+        let mx_ind = GuiApp::platform_indicator(
+            "Matrix",
+            self.status.matrix_configured,
+            self.status.matrix_connected,
         );
 
         let ctrl_label = if self.status.running {
@@ -433,7 +435,7 @@ impl GuiApp {
 
         let platforms = section(
             "Platforms",
-            column![row![disc_ind, qq_ind, tg_ind].spacing(24), ctrl_btn].spacing(10),
+            column![row![disc_ind, qq_ind, tg_ind, mx_ind].spacing(24), ctrl_btn].spacing(10),
         );
 
         // Config section
@@ -467,9 +469,7 @@ impl GuiApp {
         );
 
         // Logs section
-        let log_text = text(self.logs.concat())
-            .size(12)
-            .style(style::log_text);
+        let log_text = text(self.logs.concat()).size(12).style(style::log_text);
 
         let log_viewer = container(
             scrollable(container(log_text).padding(4).width(iced::Length::Fill))

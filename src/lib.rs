@@ -21,6 +21,8 @@ pub mod config;
 pub mod discord_client;
 pub mod discord_sender;
 pub mod error;
+pub mod matrix_client;
+pub mod matrix_sender;
 pub mod message;
 pub mod onebot_api;
 pub mod onebot_types;

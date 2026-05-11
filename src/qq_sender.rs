@@ -49,6 +49,7 @@ impl PlatformSender for QQSender {
         let prefix = match msg.source() {
             Platform::Discord => "[Discord]",
             Platform::Telegram => "[Telegram]",
+            Platform::Matrix => "[Matrix]",
             Platform::QQ => unreachable!("bridge filters own platform"),
         };
 

@@ -49,6 +49,7 @@ pub enum Platform {
     QQ,
     Discord,
     Telegram,
+    Matrix,
 }
 
 pub struct QQMessage {
@@ -138,6 +139,35 @@ impl Message for TelegramMessage {
     }
 }
 
+pub struct MatrixMessage {
+    pub msg_id: String,
+    pub sender_name: String,
+    pub content: String,
+    pub reply_to_msg_id: Option<String>,
+    pub attachments: Vec<Attachment>,
+}
+
+impl Message for MatrixMessage {
+    fn msg_id(&self) -> &str {
+        &self.msg_id
+    }
+    fn sender_name(&self) -> &str {
+        &self.sender_name
+    }
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn source(&self) -> Platform {
+        Platform::Matrix
+    }
+    fn reply_to_msg_id(&self) -> Option<&str> {
+        self.reply_to_msg_id.as_deref()
+    }
+    fn attachments(&self) -> &[Attachment] {
+        &self.attachments
+    }
+}
+
 /// Resolved result of a reply lookup: maps one original message to IDs on all known platforms.
 #[derive(Debug, Clone)]
 pub struct ReplyRecord {
@@ -147,6 +177,7 @@ pub struct ReplyRecord {
     pub discord_msg_id: Option<String>,
     pub qq_msg_id: Option<String>,
     pub telegram_msg_id: Option<String>,
+    pub matrix_msg_id: Option<String>,
 }
 
 impl ReplyRecord {
@@ -156,6 +187,7 @@ impl ReplyRecord {
             Platform::Discord => self.discord_msg_id.as_deref(),
             Platform::QQ => self.qq_msg_id.as_deref(),
             Platform::Telegram => self.telegram_msg_id.as_deref(),
+            Platform::Matrix => self.matrix_msg_id.as_deref(),
         }
     }
 }
