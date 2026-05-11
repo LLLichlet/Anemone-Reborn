@@ -31,7 +31,7 @@ pub struct BridgeConfig {
     pub telegram_group_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub bind_addr: Option<String>,

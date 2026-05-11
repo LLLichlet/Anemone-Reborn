@@ -24,6 +24,8 @@ rusqlite = { version = "0.39.0", features = ["bundled"] }
 base64 = "0.22.1"
 tokio-util = "0.7"
 tokio-stream = "0.1"
+iced = { version = "0.14", features = ["tokio"] }
+async-stream = "0.3"
 
 [lints.clippy]
 correctness = "deny"

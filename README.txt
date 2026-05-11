@@ -67,3 +67,21 @@ The management UI listens on webui_bind_addr (or the CLI argument, or
 separate port — bind_addr from the config — so NapCat keeps its existing
 connection target. The bot starts in "stopped" state; click "Start Bot" to
 connect all platforms. Logs respect the RUST_LOG environment variable.
+
+-------------------------------------------------------------------------------
+GUI (optional)
+
+A native desktop GUI built with the Iced framework is available via the
+`gui` binary. Run `cargo run --bin gui` to launch it.
+
+The GUI provides the same management features as the WebUI: a status bar
+with bot running/stopped indicator and per-platform connection status
+(Discord, QQ, Telegram), a Start/Stop button, a TOML config editor with
+Reload, Save, and inline validation feedback, and a live log viewer with
+auto-scroll capped at 800 lines.
+
+The GUI operates directly on the BotController and LogRing without an HTTP
+layer. The OneBot WebSocket listener is spawned automatically in the
+background if bind_addr is configured. The bot starts in "stopped" state;
+click "Start Bot" to connect. Iced, wgpu, and winit internal log messages
+are filtered to warn level and above to reduce noise in the log viewer.

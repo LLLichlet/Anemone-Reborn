@@ -58,15 +58,11 @@ async fn main() -> Result<(), AnemoneBotError> {
     let log_ring = Arc::new(LogRing::new(500));
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_filter(filter.clone());
     let ring_layer = tracing_subscriber::fmt::layer()
         .with_writer(BroadcastWriter::new(log_ring.sender()))
         .with_ansi(false)
         .with_filter(filter);
     tracing_subscriber::registry()
-        .with(stderr_layer)
         .with(ring_layer)
         .init();
 
@@ -383,7 +379,9 @@ async fn ws_handler(
     State(state): State<Arc<WebUiState>>,
 ) -> impl IntoResponse {
     match state.qq_runtime.lock().await.take() {
-        Some(runtime) => ws.on_upgrade(move |socket| bot_controller::handle_socket(socket, runtime)),
+        Some(runtime) => {
+            ws.on_upgrade(move |socket| bot_controller::handle_socket(socket, runtime))
+        }
         None => {
             tracing::warn!("onebot ws connection attempted but bot not started yet");
             axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -397,7 +395,9 @@ async fn onebot_ws_handler(
     State(qq_runtime): State<Arc<Mutex<Option<QQRuntime>>>>,
 ) -> impl IntoResponse {
     match qq_runtime.lock().await.take() {
-        Some(runtime) => ws.on_upgrade(move |socket| bot_controller::handle_socket(socket, runtime)),
+        Some(runtime) => {
+            ws.on_upgrade(move |socket| bot_controller::handle_socket(socket, runtime))
+        }
         None => {
             tracing::warn!("onebot ws connection attempted but bot not started yet");
             axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
