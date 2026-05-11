@@ -16,10 +16,21 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use anemone_bot::bot_controller;
-use anemone_bot::error::AnemoneBotError;
+pub mod bridge;
+pub mod config;
+pub mod discord_client;
+pub mod discord_sender;
+pub mod error;
+pub mod message;
+pub mod onebot_api;
+pub mod onebot_types;
+pub mod proxy;
+pub mod qq_client;
+pub mod qq_sender;
+pub mod sender;
+pub mod store;
+pub mod telegram_client;
+pub mod telegram_sender;
 
-#[tokio::main]
-async fn main() -> Result<(), AnemoneBotError> {
-    bot_controller::run_cli().await
-}
+pub mod bot_controller;
+pub mod log_buffer;

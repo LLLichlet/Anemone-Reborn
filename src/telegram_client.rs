@@ -16,14 +16,15 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use crate::bridge::{Bridges, TelegramContext};
 use crate::error::AnemoneBotError;
 use crate::message::{Attachment, TelegramMessage};
-use tracing::warn;
 
 fn sender_name(from: &serde_json::Value) -> String {
     let first = from["first_name"].as_str().unwrap_or("");
@@ -74,14 +75,24 @@ async fn get_self_id(http: &reqwest::Client, token: &str) -> Result<i64, Anemone
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(bridges: Arc<Bridges>, ctx: &TelegramContext) -> Result<(), AnemoneBotError> {
+pub async fn run(
+    bridges: Arc<Bridges>,
+    ctx: &TelegramContext,
+    cancel: CancellationToken,
+    connected: Arc<AtomicBool>,
+) -> Result<(), AnemoneBotError> {
     let self_id = get_self_id(&ctx.http, &ctx.token).await?;
     bridges.set_telegram_self_id(self_id);
     info!("telegram: self_id = {self_id}");
+    connected.store(true, Ordering::SeqCst);
 
     let mut offset: i64 = 0;
 
     loop {
+        if cancel.is_cancelled() {
+            info!("telegram: cancellation requested, shutting down");
+            break;
+        }
         let resp: serde_json::Value = match ctx
             .http
             .get(format!(
@@ -193,4 +204,6 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &TelegramContext) -> Result<(), Ane
             bridge.forward(&tg_msg).await;
         }
     }
+    connected.store(false, Ordering::SeqCst);
+    Ok(())
 }

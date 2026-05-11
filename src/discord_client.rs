@@ -16,6 +16,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
@@ -26,6 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::bridge::{Bridges, DiscordContext};
@@ -107,7 +109,12 @@ async fn gateway_connect(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), AnemoneBotError> {
+pub async fn run(
+    bridges: Arc<Bridges>,
+    ctx: &DiscordContext,
+    cancel: CancellationToken,
+    connected: Arc<AtomicBool>,
+) -> Result<(), AnemoneBotError> {
     let proxy_url = ctx.proxy.as_deref();
     if let Some(proxy) = proxy_url {
         info!("discord: using proxy {proxy}");
@@ -139,6 +146,10 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), Anem
     let gateway_url = format!("{gateway_url}/?v=10&encoding=json");
 
     loop {
+        if cancel.is_cancelled() {
+            info!("discord: cancellation requested, shutting down");
+            break;
+        }
         info!("discord: connecting to gateway...");
         let mut ws = match gateway_connect(proxy_url, &gateway_url).await {
             Ok(ws) => ws,
@@ -158,6 +169,10 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), Anem
 
         loop {
             tokio::select! {
+                () = cancel.cancelled() => {
+                    info!("discord: cancellation requested during gateway loop");
+                    break;
+                }
                 // Heartbeat: triggered by the heartbeat task via mpsc
                 Some(()) = hb_rx.recv() => {
                     let hb = json!({"op": 1, "d": last_seq});
@@ -255,6 +270,7 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), Anem
 
                                     ctx.http_lock.set(http.clone()).ok();
                                     bridges.set_discord_self_id(id);
+                                    connected.store(true, Ordering::SeqCst);
                                 }
                                 "MESSAGE_CREATE" => {
                                     let channel_id = payload["d"]["channel_id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
@@ -323,7 +339,10 @@ pub async fn run(bridges: Arc<Bridges>, ctx: &DiscordContext) -> Result<(), Anem
             }
         }
 
+        connected.store(false, Ordering::SeqCst);
         info!("discord: gateway disconnected, reconnecting...");
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
+    connected.store(false, Ordering::SeqCst);
+    Ok(())
 }

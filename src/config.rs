@@ -31,10 +31,12 @@ pub struct BridgeConfig {
     pub telegram_group_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
     pub bind_addr: Option<String>,
+    #[serde(default)]
+    pub webui_bind_addr: Option<String>,
     #[serde(default)]
     pub discord_token: Option<String>,
     #[serde(default)]
