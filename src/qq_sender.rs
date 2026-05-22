@@ -86,4 +86,12 @@ impl PlatformSender for QQSender {
         let msg_id = api.send_group_msg(self.group_id, &text).await?;
         Ok(msg_id.to_string())
     }
+
+    async fn delete_message(&self, msg_id: &str) -> Result<(), AnemoneBotError> {
+        let message_id = msg_id
+            .parse::<i64>()
+            .map_err(|_| AnemoneBotError::WebSocket("qq message id parse failed".into()))?;
+        let api = Api::new(self.tx.clone(), self.pending.clone());
+        api.delete_msg(message_id).await
+    }
 }

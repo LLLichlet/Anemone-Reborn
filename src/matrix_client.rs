@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 use crate::bridge::{Bridges, MatrixContext};
 use crate::error::AnemoneBotError;
 use crate::message::{Attachment, MatrixMessage};
+use crate::message::Platform;
 
 /// Strip the homeserver suffix from a Matrix user ID for display.
 /// "@alice:matrix.org" → "alice"
@@ -96,7 +97,7 @@ pub async fn run(
     let self_id = get_self_id(&ctx.http, homeserver, &ctx.token).await?;
     bridges.set_matrix_self_id(self_id.clone());
     info!("matrix: self_id = {self_id}");
-    connected.store(true, Ordering::SeqCst);
+    connected.store(true, Ordering::Relaxed);
 
     let mut since: Option<String> = None;
 
@@ -152,7 +153,7 @@ pub async fn run(
             for event in events {
                 // Only process m.room.message events
                 let event_type = event["type"].as_str().unwrap_or("");
-                if event_type != "m.room.message" {
+                if event_type != "m.room.message" && event_type != "m.room.redaction" {
                     continue;
                 }
 
@@ -161,6 +162,20 @@ pub async fn run(
                 };
 
                 let sender = event["sender"].as_str().unwrap_or("unknown");
+
+                if event_type == "m.room.redaction" {
+                    let Some(redacts) = event["redacts"].as_str() else {
+                        continue;
+                    };
+                    if !bridge.is_source_message(Platform::Matrix, redacts) {
+                        continue;
+                    }
+                    if bridge.take_suppressed_recall(Platform::Matrix, redacts) {
+                        continue;
+                    }
+                    bridge.recall(Platform::Matrix, redacts).await;
+                    continue;
+                }
 
                 // Filter self messages
                 if bridges.is_self_matrix(sender) {
@@ -241,6 +256,6 @@ pub async fn run(
             }
         }
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     Ok(())
 }

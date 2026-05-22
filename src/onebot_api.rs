@@ -87,4 +87,16 @@ impl Api {
             AnemoneBotError::WebSocket("missing message_id in onebot response".into())
         })
     }
+
+    pub async fn delete_msg(&self, message_id: i64) -> Result<(), AnemoneBotError> {
+        let _ = self
+            .call(
+                "delete_msg",
+                &serde_json::json!({
+                    "message_id": message_id,
+                }),
+            )
+            .await?;
+        Ok(())
+    }
 }

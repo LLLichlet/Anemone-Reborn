@@ -44,7 +44,7 @@ pub trait Message: Sync {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     QQ,
     Discord,

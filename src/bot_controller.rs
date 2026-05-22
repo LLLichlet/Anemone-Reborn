@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -111,13 +112,14 @@ impl BotController {
         }
         let cancel = CancellationToken::new();
 
-        inner.discord_connected.store(false, Ordering::SeqCst);
-        inner.qq_connected.store(false, Ordering::SeqCst);
-        inner.telegram_connected.store(false, Ordering::SeqCst);
-        inner.matrix_connected.store(false, Ordering::SeqCst);
+        inner.discord_connected.store(false, Ordering::Relaxed);
+        inner.qq_connected.store(false, Ordering::Relaxed);
+        inner.telegram_connected.store(false, Ordering::Relaxed);
+        inner.matrix_connected.store(false, Ordering::Relaxed);
 
         let store = Arc::new(MessageStore::new("anemone-bot.db")?);
         store.prune(604_800)?;
+        store.prune_recalled(604_800)?;
 
         let http_client = build_reqwest_client(config.http_proxy.as_deref())?;
 
@@ -240,6 +242,22 @@ impl BotController {
             cancel: cancel.clone(),
         });
 
+        let cleanup_bridges = bridges.clone();
+        let cleanup_store = store.clone();
+        let cleanup_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    () = cleanup_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        cleanup_bridges.prune_recall_state(Duration::from_secs(600));
+                        let _ = cleanup_store.prune_recalled(604_800);
+                    }
+                }
+            }
+        });
+
         // Build QQRuntime after bridges is ready
         let qq_connected = inner.qq_connected.clone();
         let qq_runtime = qq_rx.map(|rx| QQRuntime {
@@ -282,10 +300,10 @@ impl BotController {
             qq_configured: config.bind_addr.is_some(),
             telegram_configured: config.telegram_token.is_some(),
             matrix_configured: config.matrix_token.is_some(),
-            discord_connected: inner.discord_connected.load(Ordering::SeqCst),
-            qq_connected: inner.qq_connected.load(Ordering::SeqCst),
-            telegram_connected: inner.telegram_connected.load(Ordering::SeqCst),
-            matrix_connected: inner.matrix_connected.load(Ordering::SeqCst),
+            discord_connected: inner.discord_connected.load(Ordering::Relaxed),
+            qq_connected: inner.qq_connected.load(Ordering::Relaxed),
+            telegram_connected: inner.telegram_connected.load(Ordering::Relaxed),
+            matrix_connected: inner.matrix_connected.load(Ordering::Relaxed),
         }
     }
 
@@ -382,6 +400,9 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
                                 );
                                 crate::qq_client::handle_message(event, &bridges).await;
                             }
+                            Ok(event) if event.post_type == "notice" => {
+                                crate::qq_client::handle_notice(event, &bridges).await;
+                            }
                             Ok(event)
                                 if event.post_type == "meta_event"
                                     && event.meta_event_type == "lifecycle"
@@ -390,7 +411,7 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
                                 info!("napcat connected, self_id = {}", event.self_id);
                                 bridges.set_qq_self_id(event.self_id);
                                 let _ = qq_self_id.set(event.self_id);
-                                connected.store(true, Ordering::SeqCst);
+                                connected.store(true, Ordering::Relaxed);
                             }
                             Ok(_) => {}
                             Err(e) => error!("failed to parse event: {e}"),
@@ -409,7 +430,7 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
             }
         }
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     write_task.abort();
 }
 

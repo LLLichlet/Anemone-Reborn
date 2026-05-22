@@ -42,4 +42,7 @@ pub trait PlatformSender: Send + Sync {
         msg: &dyn Message,
         reply_to_msg_id: Option<String>,
     ) -> Result<String, AnemoneBotError>;
+
+    /// Try to delete a message on this platform.
+    async fn delete_message(&self, msg_id: &str) -> Result<(), AnemoneBotError>;
 }

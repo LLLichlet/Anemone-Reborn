@@ -39,8 +39,28 @@ pub struct MatrixSender {
 }
 
 fn txn_id() -> String {
-    let n = TXN_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let n = TXN_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("anemone-{n}")
+}
+
+fn encode_path_segment(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~' => output.push(byte as char),
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(output, "%{byte:02X}");
+            }
+        }
+    }
+    output
 }
 
 /// Strip the homeserver suffix from a Matrix user ID for display.
@@ -163,6 +183,30 @@ impl PlatformSender for MatrixSender {
             }
             first_event_id
                 .ok_or_else(|| AnemoneBotError::WebSocket("matrix: no images sent".into()))
+        }
+    }
+
+    async fn delete_message(&self, msg_id: &str) -> Result<(), AnemoneBotError> {
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/redact/{}/{}",
+            self.homeserver_url.trim_end_matches('/'),
+            self.room_id,
+            encode_path_segment(msg_id),
+            txn_id(),
+        );
+        let resp: serde_json::Value = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.token)
+            .json(&json!({"reason": "recalled"}))
+            .send()
+            .await?
+            .json()
+            .await?;
+        if resp.get("event_id").is_some() {
+            Ok(())
+        } else {
+            Err(AnemoneBotError::WebSocket("matrix redact failed".into()))
         }
     }
 }

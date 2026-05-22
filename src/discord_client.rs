@@ -33,6 +33,7 @@ use tracing::{error, info, warn};
 use crate::bridge::{Bridges, DiscordContext};
 use crate::error::AnemoneBotError;
 use crate::message::{Attachment, DiscordMessage};
+use crate::message::Platform;
 use crate::proxy::build_reqwest_client;
 
 /// Connect to `host:port` through an HTTP CONNECT proxy.
@@ -270,7 +271,7 @@ pub async fn run(
 
                                     ctx.http_lock.set(http.clone()).ok();
                                     bridges.set_discord_self_id(id);
-                                    connected.store(true, Ordering::SeqCst);
+                                    connected.store(true, Ordering::Relaxed);
                                 }
                                 "MESSAGE_CREATE" => {
                                     let channel_id = payload["d"]["channel_id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
@@ -321,6 +322,42 @@ pub async fn run(
                                     };
                                     bridge.forward(&msg).await;
                                 }
+                                "MESSAGE_DELETE" => {
+                                    let channel_id = payload["d"]["channel_id"]
+                                        .as_str()
+                                        .and_then(|s| s.parse::<u64>().ok())
+                                        .unwrap_or(0);
+                                    let Some(bridge) = bridges.by_discord(channel_id) else { continue; };
+                                    if let Some(message_id) = payload["d"]["id"].as_str() {
+                                        if !bridge.is_source_message(Platform::Discord, message_id) {
+                                            continue;
+                                        }
+                                        if bridge.take_suppressed_recall(Platform::Discord, message_id) {
+                                            continue;
+                                        }
+                                        bridge.recall(Platform::Discord, message_id).await;
+                                    }
+                                }
+                                "MESSAGE_DELETE_BULK" => {
+                                    let channel_id = payload["d"]["channel_id"]
+                                        .as_str()
+                                        .and_then(|s| s.parse::<u64>().ok())
+                                        .unwrap_or(0);
+                                    let Some(bridge) = bridges.by_discord(channel_id) else { continue; };
+                                    if let Some(ids) = payload["d"]["ids"].as_array() {
+                                        for id in ids {
+                                            if let Some(message_id) = id.as_str() {
+                                                if !bridge.is_source_message(Platform::Discord, message_id) {
+                                                    continue;
+                                                }
+                                                if bridge.take_suppressed_recall(Platform::Discord, message_id) {
+                                                    continue;
+                                                }
+                                                bridge.recall(Platform::Discord, message_id).await;
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -339,10 +376,10 @@ pub async fn run(
             }
         }
 
-        connected.store(false, Ordering::SeqCst);
+        connected.store(false, Ordering::Relaxed);
         info!("discord: gateway disconnected, reconnecting...");
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     Ok(())
 }

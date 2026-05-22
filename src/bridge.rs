@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::time::Instant;
 
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
@@ -27,7 +29,7 @@ use tracing::{error, info, warn};
 use crate::config::BridgeConfig;
 use crate::discord_sender::DiscordSender;
 use crate::matrix_sender::MatrixSender;
-use crate::message::Message;
+use crate::message::{Message, Platform};
 use crate::onebot_api::PendingMap;
 use crate::qq_sender::QQSender;
 use crate::sender::PlatformSender;
@@ -76,6 +78,7 @@ pub struct Bridge {
     telegram_self_id: Arc<OnceLock<i64>>,
     matrix_self_id: Arc<OnceLock<String>>,
     ready: Arc<AtomicBool>,
+    suppressed_recalls: Arc<Mutex<HashMap<(Platform, String), Instant>>>,
 }
 
 fn preview(content: &str, limit: usize) -> String {
@@ -111,6 +114,7 @@ impl Bridge {
             telegram_self_id,
             matrix_self_id,
             ready,
+            suppressed_recalls: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -148,15 +152,49 @@ impl Bridge {
         self.matrix_self_id.get().map(String::as_str) == Some(user_id)
     }
 
+    pub fn is_source_message(&self, platform: Platform, msg_id: &str) -> bool {
+        self.store
+            .is_source_message(&self.group_key, platform, msg_id)
+            .unwrap_or(false)
+    }
+
+    pub fn suppress_recall(&self, platform: Platform, msg_id: &str) {
+        let mut guard = self.suppressed_recalls.lock().unwrap();
+        guard.insert((platform, msg_id.to_string()), Instant::now());
+    }
+
+    pub fn take_suppressed_recall(&self, platform: Platform, msg_id: &str) -> bool {
+        let mut guard = self.suppressed_recalls.lock().unwrap();
+        guard.remove(&(platform, msg_id.to_string())).is_some()
+    }
+
+    pub fn prune_suppressed_recalls(&self, max_age: std::time::Duration) {
+        let mut guard = self.suppressed_recalls.lock().unwrap();
+        guard.retain(|_, created_at| created_at.elapsed() <= max_age);
+    }
+
     // -- forwarding ----------------------------------------------------------
 
     /// Forward an incoming message to all other platforms.
     /// Resolves reply mappings via the store, then calls each non-source sender.
     pub async fn forward(&self, msg: &dyn Message) {
-        if !self.ready.load(Ordering::SeqCst) {
+        if !self.ready.load(Ordering::Acquire) {
             info!(
                 "not all platforms ready yet, dropping message from {:?}",
                 msg.source()
+            );
+            return;
+        }
+
+        if self
+            .store
+            .is_recalled(&self.group_key, msg.source(), msg.msg_id())
+            .unwrap_or(false)
+        {
+            info!(
+                "source message already recalled, skipping forward for {:?} {}",
+                msg.source(),
+                msg.msg_id()
             );
             return;
         }
@@ -176,6 +214,19 @@ impl Bridge {
                 continue;
             }
 
+            if self
+                .store
+                .is_recalled(&self.group_key, msg.source(), msg.msg_id())
+                .unwrap_or(false)
+            {
+                info!(
+                    "source message recalled during forward, stopping fanout for {:?} {}",
+                    msg.source(),
+                    msg.msg_id()
+                );
+                return;
+            }
+
             let target_reply_id = reply_record
                 .as_ref()
                 .and_then(|r| r.id_on(sender.platform()))
@@ -183,6 +234,24 @@ impl Bridge {
 
             match sender.send(msg, target_reply_id).await {
                 Ok(dst_msg_id) => {
+                    if self
+                        .store
+                        .is_recalled(&self.group_key, msg.source(), msg.msg_id())
+                        .unwrap_or(false)
+                    {
+                        self.suppress_recall(sender.platform(), &dst_msg_id);
+                        if let Err(e) = sender.delete_message(&dst_msg_id).await {
+                            let _ = self.take_suppressed_recall(sender.platform(), &dst_msg_id);
+                            warn!(
+                                "late recall cleanup {:?} {} -> {:?} {} failed: {e}",
+                                msg.source(),
+                                msg.msg_id(),
+                                sender.platform(),
+                                dst_msg_id,
+                            );
+                        }
+                    }
+
                     let _ = self.store.insert(
                         &self.group_key,
                         msg.source(),
@@ -207,6 +276,51 @@ impl Bridge {
                         sender.platform(),
                     );
                 }
+            }
+        }
+    }
+
+    /// Try to delete every bridged copy of a message.
+    pub async fn recall(&self, source_platform: Platform, msg_id: &str) {
+        let _ = self
+            .store
+            .mark_recalled(&self.group_key, source_platform, msg_id);
+
+        let related = match self.store.related_message_ids(&self.group_key, source_platform, msg_id) {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!("store lookup for recall failed: {e}");
+                return;
+            }
+        };
+
+        for (platform, target_msg_id) in related {
+            if platform == source_platform && target_msg_id == msg_id {
+                continue;
+            }
+
+            let Some(sender) = self.senders.iter().find(|sender| sender.platform() == platform) else {
+                continue;
+            };
+
+            self.suppress_recall(platform, &target_msg_id);
+            if let Err(e) = sender.delete_message(&target_msg_id).await {
+                let _ = self.take_suppressed_recall(platform, &target_msg_id);
+                warn!(
+                    "recall {:?} {} -> {:?} {} failed: {e}",
+                    source_platform,
+                    msg_id,
+                    platform,
+                    target_msg_id,
+                );
+            } else {
+                info!(
+                    "recalled {:?} {} -> {:?} {}",
+                    source_platform,
+                    msg_id,
+                    platform,
+                    target_msg_id,
+                );
             }
         }
     }
@@ -360,7 +474,7 @@ impl Bridges {
                 .as_ref()
                 .is_none_or(|l| l.get().is_some());
         if ok {
-            self.ready.store(true, Ordering::SeqCst);
+            self.ready.store(true, Ordering::Release);
         }
     }
 
@@ -406,6 +520,21 @@ impl Bridges {
             .values()
             .next()
             .is_some_and(|b| b.is_self_matrix(user_id))
+    }
+
+    pub fn prune_recall_state(&self, max_age: std::time::Duration) {
+        for bridge in self.by_discord.values() {
+            bridge.prune_suppressed_recalls(max_age);
+        }
+        for bridge in self.by_qq.values() {
+            bridge.prune_suppressed_recalls(max_age);
+        }
+        for bridge in self.by_telegram.values() {
+            bridge.prune_suppressed_recalls(max_age);
+        }
+        for bridge in self.by_matrix.values() {
+            bridge.prune_suppressed_recalls(max_age);
+        }
     }
 
     pub fn set_qq_self_id(&self, id: i64) {
