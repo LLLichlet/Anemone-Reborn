@@ -18,6 +18,7 @@
 
 use crate::bridge::Bridges;
 use crate::message::{Attachment, QQMessage};
+use crate::message::Platform;
 use crate::onebot_types::Event;
 use tracing::info;
 
@@ -157,4 +158,24 @@ pub async fn handle_message(event: Event, bridges: &Bridges) {
         attachments: images,
     };
     bridge.forward(&msg).await;
+}
+
+pub async fn handle_notice(event: Event, bridges: &Bridges) {
+    if event.notice_type != "group_recall" {
+        return;
+    }
+    let Some(bridge) = bridges.by_qq(event.group_id) else {
+        return;
+    };
+    let msg_id = event.message_id.to_string();
+    if !bridge.is_source_message(Platform::QQ, &msg_id) {
+        return;
+    }
+    if bridge.take_suppressed_recall(Platform::QQ, &msg_id) {
+        return;
+    }
+    if bridges.is_self_qq(event.user_id) {
+        return;
+    }
+    bridge.recall(Platform::QQ, &msg_id).await;
 }

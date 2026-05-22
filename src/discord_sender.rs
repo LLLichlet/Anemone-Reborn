@@ -124,4 +124,21 @@ impl PlatformSender for DiscordSender {
             }
         }
     }
+
+    async fn delete_message(&self, msg_id: &str) -> Result<(), AnemoneBotError> {
+        let http = self
+            .http
+            .get()
+            .ok_or_else(|| AnemoneBotError::WebSocket("discord http not ready".into()))?;
+
+        let message_id = msg_id
+            .parse::<u64>()
+            .map_err(|_| AnemoneBotError::WebSocket("discord message id parse failed".into()))?;
+        let channel = serenity::model::id::ChannelId::new(self.channel_id);
+        channel
+            .delete_message(http, MessageId::new(message_id))
+            .await
+            .map_err(|e| AnemoneBotError::Serenity(e.to_string()))?;
+        Ok(())
+    }
 }

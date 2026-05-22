@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -118,6 +119,7 @@ impl BotController {
 
         let store = Arc::new(MessageStore::new("anemone-bot.db")?);
         store.prune(604_800)?;
+        store.prune_recalled(604_800)?;
 
         let http_client = build_reqwest_client(config.http_proxy.as_deref())?;
 
@@ -238,6 +240,22 @@ impl BotController {
 
         inner.handle = Some(BotHandle {
             cancel: cancel.clone(),
+        });
+
+        let cleanup_bridges = bridges.clone();
+        let cleanup_store = store.clone();
+        let cleanup_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    () = cleanup_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        cleanup_bridges.prune_recall_state(Duration::from_secs(600));
+                        let _ = cleanup_store.prune_recalled(604_800);
+                    }
+                }
+            }
         });
 
         // Build QQRuntime after bridges is ready
@@ -381,6 +399,9 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
                                     event.user_id, event.message_type, event.message
                                 );
                                 crate::qq_client::handle_message(event, &bridges).await;
+                            }
+                            Ok(event) if event.post_type == "notice" => {
+                                crate::qq_client::handle_notice(event, &bridges).await;
                             }
                             Ok(event)
                                 if event.post_type == "meta_event"

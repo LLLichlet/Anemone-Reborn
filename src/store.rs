@@ -16,6 +16,7 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection};
@@ -51,6 +52,19 @@ impl MessageStore {
                 ON message_routes(group_key, src_plat, src_msg_id);
             CREATE INDEX IF NOT EXISTS idx_dst_lookup
                 ON message_routes(group_key, dst_plat, dst_msg_id);",
+        )?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS recalled_messages (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_key  TEXT NOT NULL,
+                plat       TEXT NOT NULL,
+                msg_id     TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_recalled_lookup
+                ON recalled_messages(group_key, plat, msg_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_recalled_unique
+                ON recalled_messages(group_key, plat, msg_id);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -140,6 +154,124 @@ impl MessageStore {
             telegram_msg_id: telegram_id,
             matrix_msg_id: matrix_id,
         }))
+    }
+
+    /// Collect all linked message IDs across platforms for a bridged message.
+    ///
+    /// This walks the route table until no new endpoint IDs are discovered,
+    /// so recalls can fan out to every bridged copy of the same message.
+    pub fn related_message_ids(
+        &self,
+        group_key: &str,
+        platform: Platform,
+        msg_id: &str,
+    ) -> Result<Vec<(Platform, String)>, AnemoneBotError> {
+        let conn = self.conn.lock().unwrap();
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut queue: VecDeque<(String, String)> = VecDeque::new();
+        queue.push_back((Self::plat_str(platform).to_string(), msg_id.to_string()));
+
+        while let Some((plat, id)) = queue.pop_front() {
+            if !seen.insert((plat.clone(), id.clone())) {
+                continue;
+            }
+
+                        let mut stmt = conn.prepare(
+                "SELECT src_plat, src_msg_id, dst_plat, dst_msg_id
+                 FROM message_routes
+                 WHERE group_key = ?1
+                   AND ((src_plat = ?2 AND src_msg_id = ?3)
+                     OR (dst_plat = ?2 AND dst_msg_id = ?3))",
+            )?;
+
+            let rows = stmt.query_map(params![group_key, plat, id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (src_plat, src_msg_id, dst_plat, dst_msg_id) = row?;
+                if !seen.contains(&(src_plat.clone(), src_msg_id.clone())) {
+                    queue.push_back((src_plat, src_msg_id));
+                }
+                if !seen.contains(&(dst_plat.clone(), dst_msg_id.clone())) {
+                    queue.push_back((dst_plat, dst_msg_id));
+                }
+            }
+        }
+
+        Ok(seen
+            .into_iter()
+            .map(|(plat, id)| (Self::plat_from_str(&plat), id))
+            .collect())
+    }
+
+    /// Remember that a message was already recalled on its source platform.
+    /// This lets forwarders short-circuit even if the source delete event
+    /// arrives before the original message has been written to `message_routes`.
+    pub fn mark_recalled(
+        &self,
+        group_key: &str,
+        platform: Platform,
+        msg_id: &str,
+    ) -> Result<(), AnemoneBotError> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO recalled_messages (group_key, plat, msg_id)
+             VALUES (?1, ?2, ?3)",
+            params![group_key, Self::plat_str(platform), msg_id],
+        )?;
+        Ok(())
+    }
+
+    /// Check whether a message was already recalled on its source platform.
+    pub fn is_recalled(
+        &self,
+        group_key: &str,
+        platform: Platform,
+        msg_id: &str,
+    ) -> Result<bool, AnemoneBotError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM recalled_messages
+             WHERE group_key = ?1 AND plat = ?2 AND msg_id = ?3
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![group_key, Self::plat_str(platform), msg_id], |_| {
+            Ok(())
+        })?;
+        Ok(rows.next().is_some())
+    }
+
+    /// Check whether a message ID belongs to the source side of a bridge.
+    pub fn is_source_message(
+        &self,
+        group_key: &str,
+        platform: Platform,
+        msg_id: &str,
+    ) -> Result<bool, AnemoneBotError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT 1 FROM message_routes
+             WHERE group_key = ?1 AND src_plat = ?2 AND src_msg_id = ?3
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![group_key, Self::plat_str(platform), msg_id], |_| {
+            Ok(())
+        })?;
+        Ok(rows.next().is_some())
+    }
+
+    /// Remove recall markers older than `retention_secs`.
+    pub fn prune_recalled(&self, retention_secs: i64) -> Result<(), AnemoneBotError> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM recalled_messages WHERE created_at < unixepoch() - ?1",
+            params![retention_secs],
+        )?;
+        Ok(())
     }
 
     /// Record a forwarded message mapping.

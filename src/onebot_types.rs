@@ -33,11 +33,15 @@ pub struct Event {
     #[serde(default)]
     pub message_type: String,
     #[serde(default)]
+    pub notice_type: String,
+    #[serde(default)]
     pub message_id: i64,
     #[serde(default)]
     pub user_id: i64,
     #[serde(default)]
     pub group_id: i64,
+    #[serde(default)]
+    pub operator_id: i64,
     #[serde(default, rename = "raw_message")]
     pub message: String,
     #[serde(default)]

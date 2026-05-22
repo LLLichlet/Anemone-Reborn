@@ -205,4 +205,35 @@ impl PlatformSender for TelegramSender {
                 AnemoneBotError::WebSocket("missing message_id in sendMediaGroup response".into())
             })
     }
+
+    async fn delete_message(&self, msg_id: &str) -> Result<(), AnemoneBotError> {
+        let message_id = msg_id
+            .parse::<i64>()
+            .map_err(|_| AnemoneBotError::WebSocket("telegram message id parse failed".into()))?;
+        let resp: serde_json::Value = self
+            .http
+            .post(format!("{}/deleteMessage", self.api_base()))
+            .json(&json!({
+                "chat_id": self.chat_id,
+                "message_id": message_id,
+            }))
+            .send()
+            .await?
+            .json()
+            .await?;
+        if resp["ok"].as_bool().unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(AnemoneBotError::WebSocket(format!(
+                "telegram deleteMessage failed: {}",
+                resp["description"].as_str().unwrap_or("unknown")
+            )))
+        }
+    }
+}
+
+impl TelegramSender {
+    fn api_base(&self) -> String {
+        format!("https://api.telegram.org/bot{}", self.token)
+    }
 }

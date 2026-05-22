@@ -25,6 +25,7 @@ use tracing::{error, info, warn};
 use crate::bridge::{Bridges, TelegramContext};
 use crate::error::AnemoneBotError;
 use crate::message::{Attachment, TelegramMessage};
+use crate::message::Platform;
 
 fn sender_name(from: &serde_json::Value) -> String {
     let first = from["first_name"].as_str().unwrap_or("");
@@ -134,6 +135,27 @@ pub async fn run(
         for update in updates {
             let update_id = update["update_id"].as_i64().unwrap_or(0);
             offset = offset.max(update_id + 1);
+
+            if let Some(deleted) = update.get("deleted_business_messages") {
+                let chat_id = deleted["chat"]["id"].as_i64().unwrap_or(0);
+                if let Some(bridge) = bridges.by_telegram(chat_id) {
+                    if let Some(message_ids) = deleted["message_ids"].as_array() {
+                        for message_id in message_ids {
+                            if let Some(id) = message_id.as_i64() {
+                                let id_str = id.to_string();
+                                if !bridge.is_source_message(Platform::Telegram, &id_str) {
+                                    continue;
+                                }
+                                if bridge.take_suppressed_recall(Platform::Telegram, &id_str) {
+                                    continue;
+                                }
+                                bridge.recall(Platform::Telegram, &id_str).await;
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
 
             let Some(msg) = update.get("message") else {
                 continue;
