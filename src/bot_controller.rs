@@ -111,10 +111,10 @@ impl BotController {
         }
         let cancel = CancellationToken::new();
 
-        inner.discord_connected.store(false, Ordering::SeqCst);
-        inner.qq_connected.store(false, Ordering::SeqCst);
-        inner.telegram_connected.store(false, Ordering::SeqCst);
-        inner.matrix_connected.store(false, Ordering::SeqCst);
+        inner.discord_connected.store(false, Ordering::Relaxed);
+        inner.qq_connected.store(false, Ordering::Relaxed);
+        inner.telegram_connected.store(false, Ordering::Relaxed);
+        inner.matrix_connected.store(false, Ordering::Relaxed);
 
         let store = Arc::new(MessageStore::new("anemone-bot.db")?);
         store.prune(604_800)?;
@@ -282,10 +282,10 @@ impl BotController {
             qq_configured: config.bind_addr.is_some(),
             telegram_configured: config.telegram_token.is_some(),
             matrix_configured: config.matrix_token.is_some(),
-            discord_connected: inner.discord_connected.load(Ordering::SeqCst),
-            qq_connected: inner.qq_connected.load(Ordering::SeqCst),
-            telegram_connected: inner.telegram_connected.load(Ordering::SeqCst),
-            matrix_connected: inner.matrix_connected.load(Ordering::SeqCst),
+            discord_connected: inner.discord_connected.load(Ordering::Relaxed),
+            qq_connected: inner.qq_connected.load(Ordering::Relaxed),
+            telegram_connected: inner.telegram_connected.load(Ordering::Relaxed),
+            matrix_connected: inner.matrix_connected.load(Ordering::Relaxed),
         }
     }
 
@@ -390,7 +390,7 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
                                 info!("napcat connected, self_id = {}", event.self_id);
                                 bridges.set_qq_self_id(event.self_id);
                                 let _ = qq_self_id.set(event.self_id);
-                                connected.store(true, Ordering::SeqCst);
+                                connected.store(true, Ordering::Relaxed);
                             }
                             Ok(_) => {}
                             Err(e) => error!("failed to parse event: {e}"),
@@ -409,7 +409,7 @@ pub async fn handle_socket(socket: WebSocket, runtime: QQRuntime) {
             }
         }
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     write_task.abort();
 }
 

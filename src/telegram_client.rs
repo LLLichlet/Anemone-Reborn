@@ -84,7 +84,7 @@ pub async fn run(
     let self_id = get_self_id(&ctx.http, &ctx.token).await?;
     bridges.set_telegram_self_id(self_id);
     info!("telegram: self_id = {self_id}");
-    connected.store(true, Ordering::SeqCst);
+    connected.store(true, Ordering::Relaxed);
 
     let mut offset: i64 = 0;
 
@@ -204,6 +204,6 @@ pub async fn run(
             bridge.forward(&tg_msg).await;
         }
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     Ok(())
 }

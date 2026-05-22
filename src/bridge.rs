@@ -153,7 +153,7 @@ impl Bridge {
     /// Forward an incoming message to all other platforms.
     /// Resolves reply mappings via the store, then calls each non-source sender.
     pub async fn forward(&self, msg: &dyn Message) {
-        if !self.ready.load(Ordering::SeqCst) {
+        if !self.ready.load(Ordering::Acquire) {
             info!(
                 "not all platforms ready yet, dropping message from {:?}",
                 msg.source()
@@ -360,7 +360,7 @@ impl Bridges {
                 .as_ref()
                 .is_none_or(|l| l.get().is_some());
         if ok {
-            self.ready.store(true, Ordering::SeqCst);
+            self.ready.store(true, Ordering::Release);
         }
     }
 

@@ -270,7 +270,7 @@ pub async fn run(
 
                                     ctx.http_lock.set(http.clone()).ok();
                                     bridges.set_discord_self_id(id);
-                                    connected.store(true, Ordering::SeqCst);
+                                    connected.store(true, Ordering::Relaxed);
                                 }
                                 "MESSAGE_CREATE" => {
                                     let channel_id = payload["d"]["channel_id"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
@@ -339,10 +339,10 @@ pub async fn run(
             }
         }
 
-        connected.store(false, Ordering::SeqCst);
+        connected.store(false, Ordering::Relaxed);
         info!("discord: gateway disconnected, reconnecting...");
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     Ok(())
 }

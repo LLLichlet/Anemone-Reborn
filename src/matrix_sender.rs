@@ -39,7 +39,7 @@ pub struct MatrixSender {
 }
 
 fn txn_id() -> String {
-    let n = TXN_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let n = TXN_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("anemone-{n}")
 }
 

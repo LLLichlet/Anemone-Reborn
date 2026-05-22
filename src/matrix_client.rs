@@ -96,7 +96,7 @@ pub async fn run(
     let self_id = get_self_id(&ctx.http, homeserver, &ctx.token).await?;
     bridges.set_matrix_self_id(self_id.clone());
     info!("matrix: self_id = {self_id}");
-    connected.store(true, Ordering::SeqCst);
+    connected.store(true, Ordering::Relaxed);
 
     let mut since: Option<String> = None;
 
@@ -241,6 +241,6 @@ pub async fn run(
             }
         }
     }
-    connected.store(false, Ordering::SeqCst);
+    connected.store(false, Ordering::Relaxed);
     Ok(())
 }
